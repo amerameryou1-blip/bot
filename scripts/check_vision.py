@@ -23,11 +23,10 @@ def synth(me_color=(220,60,60), me_rect=(20,44,20,44), enemy_color=(60,140,240),
     return img
 
 def show(probs):
-    cls = int(probs[0].argmax(dim=0))
-    # 'me' class = 2, enemy = 3, water = 0, neutral = 1
+    cls = probs[0].argmax(dim=0)  # (16,16)
     chars = {0:'~',1:'.',2:'M',3:'E',4:'U'}
-    for r in range(0, 64, 4):
-        row = ''.join(chars.get(int(cls[r, c]), '?') for c in range(0, 64, 4))
+    for r in range(0, 16):
+        row = ''.join(chars.get(int(cls[r, c]), '?') for c in range(0, 16))
         print(row)
 
 for name, img in [("me-red + enemy-blue", synth())]:
