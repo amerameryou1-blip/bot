@@ -47,15 +47,26 @@ Camera state (zoom level, self %, enemies) is stored in every recording's
 - **Spawn fallback:** if blob-diff detection fails, calibrate from the
   leaderboard swatch (OCR).
 
-### 📊 SESSION TABLE (real matches, recorded this session)
+### 📊 SESSION TABLE (real matches recorded — all uploaded to HF `amer224/territorial-bot-data/recordings/`)
 
 | # | session | map | zoom | frames | clicks | cam gate | enemies | last survivor |
 |---|---------|-----|------|--------|--------|----------|---------|----------------|
-| 1 | 20260807-195942-948953 | Island | auto | 307 | 307 | — (pre-fix) | 8 | no |
-| 2 | 20260807-202555-355808 | Island | 1 | 120 | 120 | FAIL (0.64%,4) | 8 | no |
-| ... | (batch 1 in progress) | Island | 0/1 | ... | ... | ... | ... | ... |
-
-*(table filled in after each batch — see `recordings/*/meta.json`)*
+| 1 | 20260807-202555-355808 | Island | 1 | 120 | 120 | FAIL | 4 | no |
+| 2 | 20260807-202738-3742a0 | Island | 1 | 220 | 220 | FAIL | 5 | no |
+| 3 | 20260807-203007-498b7f | Island | 0 | 260 | 260 | PASS | 3 | no |
+| 4 | 20260807-203239-add512 | Island | 1 | 213 | 213 | FAIL | 0 | no |
+| 5 | 20260807-203516-a4fcc7 | Island | 0 | 218 | 218 | FAIL | 6 | YES |
+| 6 | 20260807-203752-fe3dfa | Island | 1 | 260 | 260 | FAIL | 3 | no |
+| 7 | 20260807-204028-195e2a | Island | 0 | 218 | 218 | FAIL | 6 | no |
+| 8 | 20260807-205446-cafa37 | Island | 1 | 220 | 220 | FAIL | 3 | no |
+| 9 | 20260807-205719-9a40dc | Island | 0 | 260 | 260 | PASS | 2 | no |
+| 10 | 20260807-205949-e36d00 | Island | 2 | 213 | 213 | FAIL | 1 | no |
+| 11 | 20260807-210228-5b470d | Island | 1 | 220 | 220 | FAIL | 3 | no |
+| 12 | 20260807-210507-4f4b9d | Island | 0 | 219 | 219 | FAIL | 5 | YES |
+| 13 | 20260807-210749-b91c32 | Island | 2 | 220 | 220 | PASS | 3 | no |
+| 14 | 20260807-212055-13fc79 | Island | 1 | 220 | 220 | PASS | 3 | no |
+| 15 | 20260807-212343-e33537 | Island | 0 | 210 | 210 | PASS | 2 | no |
+| 16 | 20260807-212618-ed0809 | Island | 2 | 0 | 0 | FAIL | 0 | no |
 
 ### 🔬 Honest notes / open items
 - **Map switching:** the editor's map type selector (Settings → Realistic Map)
