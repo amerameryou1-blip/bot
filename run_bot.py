@@ -109,6 +109,9 @@ def calibrate(page) -> Palette | None:
         log(f"using MANUAL_COLOR {MANUAL_COLOR}")
         return Palette(self_color=PlayerColor("me", *MANUAL_COLOR), enemy_colors=[],
                        tolerance=48.0, downscale=2)
+    log("auto-calibrating from leaderboard...")
+    log("  TIP: for reliable play, pick a VIVID color (red/orange/blue/purple) in the")
+    log("       Custom Scenario editor, then set MANUAL_COLOR = [r, g, b] in run_bot.py")
     for attempt in range(4):
         img = grab(page)
         pal, reason = calibrate_from_leaderboard(img, BOT_NAME)
@@ -187,6 +190,7 @@ def main() -> None:
         planner = ClickPlanner(ClickPlannerConfig(), TroopTracker(balance=512.0, land=12))
         controls = MouseControls(page)
         report = {"areas": []}
+        action_counts: dict[str, int] = {}
         start = time.time()
         last_shot = time.time()
         last_ocr = time.time()
@@ -196,6 +200,8 @@ def main() -> None:
                              controls=controls, loop_cfg=LoopConfig(hz=DECISION_HZ),
                              decision_interval_s=1.0 / DECISION_HZ)
             stats = loop.run(duration_s=8, max_ticks=int(DECISION_HZ * 8))
+            for k, v in stats.snapshot()["actions"].items():
+                action_counts[k] = action_counts.get(k, 0) + v
             img = grab(page)
             try:
                 from bot.vision import segment
@@ -216,7 +222,7 @@ def main() -> None:
                 last_shot = time.time()
 
         report["max_area"] = max([a["area"] for a in report["areas"]], default=0)
-        report["actions"] = stats.snapshot()["actions"]
+        report["actions"] = dict(sorted(action_counts.items(), key=lambda kv: -kv[1]))
         log("===== BATTLE REPORT =====")
         log(json.dumps(report, indent=2))
         with open(os.path.join(OUT, "battle_report.json"), "w") as f:

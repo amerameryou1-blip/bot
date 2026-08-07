@@ -69,11 +69,26 @@ def edges_touched(mask: np.ndarray) -> int:
     return n
 
 
-def swatch_from_strip(strip_rgb: np.ndarray, min_frac: float = 0.03) -> list[int] | None:
+def dominant_colors(img: np.ndarray, n: int = 6, min_frac: float = 0.03) -> list[list[int]]:
+    """The most common colors in the frame that cover a meaningful fraction.
+
+    Terrain/UI backgrounds dominate (>3% of the frame); player territories
+    (12 px at match start, ~0.01%) never do. Used to reject false swatch reads.
+    """
+    px = img[::3, ::3].reshape(-1, 3).astype(int)
+    total = len(px)
+    q = (px // 24 * 24)
+    return [list(c) for c, cnt in Counter(map(tuple, q)).most_common(n) if cnt / total >= min_frac]
+
+
+def swatch_from_strip(strip_rgb: np.ndarray, min_frac: float = 0.03,
+                      bright_min: int = 140) -> list[int] | None:
     """Pick the most-saturated color in a strip (the swatch, not the panel bg).
 
     The leaderboard strip between the rank and the name contains the swatch
-    (small, highly saturated) on the panel background (dark, low saturation).
+    (small, highly saturated, BRIGHT) on the panel background (dark, dull).
+    Player colors are vivid, so we require a bright channel — this rejects
+    dark terrain-ish colors like the map's [0,96,12].
     """
     if len(strip_rgb) < 30:
         return None
@@ -81,11 +96,11 @@ def swatch_from_strip(strip_rgb: np.ndarray, min_frac: float = 0.03) -> list[int
     counts = Counter(map(tuple, q))
     total = len(strip_rgb)
     cands = []
-    for c, n in counts.most_common(12):
+    for c, n in counts.most_common(16):
         if n / total < min_frac:
             continue
         mx = max(c) - min(c)
-        if mx < 40 or max(c) < 90:
+        if mx < 60 or max(c) < bright_min:
             continue
         cands.append((mx, n, list(c)))
     if not cands:
@@ -101,8 +116,15 @@ def validate_territory_color(img: np.ndarray, color, tol: int = 48,
     Relaxed for the very start of a match: your territory begins at 12 pixels,
     so a small blob is correct. The swatch itself lives inside the leaderboard
     region (top-left), so we require the color to also appear OUTSIDE it.
+
+    A color that is among the frame's DOMINANT colors is terrain/UI, not a
+    territory — rejected regardless of blob size.
     """
     H, W = img.shape[:2]
+    # reject terrain/UI: a territory color never dominates the whole frame
+    for dc in dominant_colors(img, n=6):
+        if np.all(np.abs(np.array(color) - np.array(dc)) <= 24):
+            return False
     b = blob(img, color, tol=tol, min_area=min_area)
     if b is None:
         return False
@@ -158,39 +180,91 @@ def find_name_box(words, bot_name: str, min_ratio: float = 0.45):
 def calibrate_from_leaderboard(img: np.ndarray, bot_name: str, tol: int = 48):
     """Read my territory color from the leaderboard swatch.
 
+    Strategy: OCR every word row in the leaderboard region, read the color
+    strip left of each row, and VALIDATE each candidate. The correct row is
+    the one whose swatch color is a real (bright, non-terrain) territory blob
+    on the map. We prefer the row whose name matches `bot_name` best, but we
+    don't depend on OCR getting the name exactly right — we scan all rows and
+    pick the first that validates.
+
     Returns (Palette | None, reason_string).
     """
     words = _ocr_words(img)
     if not words:
         return None, "ocr unavailable/no words"
-    name_box, ratio = find_name_box(words, bot_name)
-    if name_box is None:
-        return None, f"name not found (best ratio {ratio:.2f})"
-    _, nx, ny, _nw, nh = name_box
 
-    sx0 = max(0, nx - SWATCH_MAX_DX)
-    sx1 = max(0, nx - SWATCH_MIN_DX)
-    strip = img[ny:ny + max(nh, 4), sx0:sx1].reshape(-1, 3).astype(int)
-    swatch = swatch_from_strip(strip)
-    if swatch is None:
-        return None, "no saturated swatch in strip"
+    # Group OCR words into rows (same y band).
+    rows: list[dict] = []
+    for w in words:
+        t, x, y, ww, hh = w
+        placed = False
+        for r in rows:
+            if abs(r["y"] - y) < 14:
+                r["words"].append(w)
+                r["y"] = min(r["y"], y)
+                placed = True
+                break
+        if not placed:
+            rows.append({"y": y, "words": [w]})
+    if not rows:
+        return None, "no rows"
 
-    if not validate_territory_color(img, swatch, tol=tol):
-        return None, f"swatch {swatch} not a valid territory blob"
+    import difflib
 
-    H, W = img.shape[:2]
-    enemies = []
-    for c in saturated_colors(img, max_colors=34):
-        if tuple(c) == tuple(swatch):
+    # Score each row: does it contain a word close to my name?
+    def row_name_score(row) -> float:
+        best = 0.0
+        for w in row["words"]:
+            ratio = difflib.SequenceMatcher(None, w[0].lower(), bot_name.lower()).ratio()
+            best = max(best, ratio)
+        return best
+
+    for row in sorted(rows, key=row_name_score, reverse=True):
+        score = row_name_score(row)
+        name_x = min(w[1] for w in row["words"])
+        ny = row["y"]
+        nh = max((w[4] for w in row["words"]), default=12)
+        # Scan the whole row band (rank + swatch + name) for the BRIGHTEST
+        # saturated color — the swatch is small but vivid; the row background
+        # is dark and gets filtered out by the brightness floor.
+        row_band = img[ny:ny + max(nh + 6, 12), max(0, name_x - 60):name_x - 2].reshape(-1, 3).astype(int)
+        swatch = swatch_from_strip(row_band)
+        if swatch is None:
             continue
-        b = blob(img, c, min_area=15)
-        if b and b["area"] < 0.4 * H * W and edges_touched(b["mask"]) < 3:
-            enemies.append(PlayerColor(f"e{len(enemies)}", *c))
-        if len(enemies) >= 10:
-            break
-    palette = Palette(self_color=PlayerColor("me", *swatch), enemy_colors=enemies,
-                      tolerance=tol, downscale=2)
-    return palette, f"leaderboard swatch={swatch} area={blob(img, swatch, tol)['area']}"
+        if not validate_territory_color(img, swatch, tol=tol):
+            continue
+
+        H, W = img.shape[:2]
+        enemies = []
+        for c in saturated_colors(img, max_colors=34):
+            if tuple(c) == tuple(swatch):
+                continue
+            b = blob(img, c, min_area=15)
+            if b and b["area"] < 0.4 * H * W and edges_touched(b["mask"]) < 3:
+                enemies.append(PlayerColor(f"e{len(enemies)}", *c))
+            if len(enemies) >= 10:
+                break
+        palette = Palette(self_color=PlayerColor("me", *swatch), enemy_colors=enemies,
+                          tolerance=tol, downscale=2)
+        return palette, f"leaderboard row(name_match={score:.2f}) swatch={swatch}"
+
+    # No row validated — diagnostics for the closest name row
+    best_row = max(rows, key=row_name_score)
+    name_x = min(w[1] for w in best_row["words"])
+    ny = best_row["y"]
+    nh = max((w[4] for w in best_row["words"]), default=12)
+    band = img[ny:ny + max(nh + 6, 12), max(0, name_x - 60):name_x - 2].reshape(-1, 3).astype(int)
+    swatch = swatch_from_strip(band)
+    H, W = img.shape[:2]
+    detail = ""
+    if swatch is not None:
+        b = blob(img, swatch, tol=tol, min_area=3)
+        if b:
+            detail = f" (area={b['area']}, frac={b['area']/(H*W):.4f}, edges={edges_touched(b['mask'])})"
+    hint = ""
+    if swatch is None:
+        hint = " (no BRIGHT saturated color in your leaderboard row — your color may be dark/terrain-like; pick a vivid color in the editor and set MANUAL_COLOR)"
+    return None, f"no row validated (closest name score={row_name_score(best_row):.2f}, swatch={swatch}{detail}){hint}"
 
 
 def center_lock_calibrate(page, grab, timeout_s: float = 30.0):
