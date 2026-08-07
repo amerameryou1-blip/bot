@@ -78,7 +78,9 @@ def load_model(net):
 
 
 # ================================================================ collect ====
-def stage_collect(seeds=28, bot_skill="medium", workers=4):
+def stage_collect(seeds=None, bot_skill="medium", workers=None):
+    seeds = seeds or int(os.environ.get("COLLECT_SEEDS", "28"))
+    workers = workers or int(os.environ.get("WORKERS", "2"))
     if DATASET.exists():
         print("dataset exists — loading", flush=True)
         return
@@ -295,8 +297,10 @@ def _train_ppo_batch(net, opt, episodes, epochs=4, gamma=0.99, lam=0.95, clip=0.
     return tot_loss / max(nb, 1)
 
 
-def stage_ppo(net, rounds=40, episodes_per_worker=2, workers=2, lr=1e-4, eval_every=5,
-              pool_cap=6000):
+def stage_ppo(net, rounds=None, episodes_per_worker=2, workers=None, lr=1e-4, eval_every=5,
+              pool_cap=8000):
+    rounds = rounds or int(os.environ.get("PPO_ROUNDS", "40"))
+    workers = workers or int(os.environ.get("WORKERS", "2"))
     opt = torch.optim.Adam(net.parameters(), lr=lr)
     import multiprocessing as mp
     pool_eps = []
