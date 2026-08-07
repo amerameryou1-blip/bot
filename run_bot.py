@@ -109,33 +109,53 @@ def blob_area(img, color, tol=24) -> int:
     return int(m.sum())
 
 
-def detect_own_color(page, attempts=10) -> Palette | None:
-    """Double-click land spots; the spawn makes a SMALL colored blob appear at
-    the click point. Sample the click-point color at 0.4s — if its global blob
-    is small (<2% frame), that's OUR territory color (causal, no OCR)."""
+def small_territory_colors(img, max_frac=0.03, min_area=60):
+    """All saturated colors whose global blob is SMALL (a fresh territory).
+
+    Returns [(color, blob_area)] sorted by area. Terrain/UI colors have huge
+    blobs and are excluded; a just-spawned territory is small.
+    """
+    H, W = img.shape[:2]
+    limit = max_frac * H * W
+    px = img[::2, ::2].reshape(-1, 3).astype(int)
+    mx = px.max(axis=1) - px.min(axis=1)
+    mask = (mx > 55) & (px.max(axis=1) > 100)
+    if not mask.any():
+        return []
+    q = (px[mask] // 16 * 16)
+    out = []
+    for c, _ in Counter(map(tuple, q)).most_common(40):
+        area = blob_area(img, list(c), tol=20)
+        if min_area < area < limit:
+            out.append((list(c), area))
+    out.sort(key=lambda x: x[1])
+    return out
+
+
+def detect_own_color(page, watch_s=18) -> Palette | None:
+    """Click to spawn, then WATCH frames for a small territory to appear.
+
+    Covers both cases: the click-spawn, or the game auto-placing us. Any small
+    saturated blob that appears is our territory (bots' territories are bigger
+    by then; terrain colors are huge). Relaxed 3% threshold — territories grow
+    fast in the first seconds.
+    """
+    # try to spawn by double-clicking a few land spots first
     img = grab(page)
-    spots = land_spots(img)
-    for spot in spots:
+    for spot in land_spots(img, n=4):
         page.mouse.dblclick(spot[0], spot[1])
-        log(f"double-clicked ({spot[0]},{spot[1]})")
-        found = None
-        for dt in (1.2, 2.6):
-            time.sleep(dt - (0.0 if found is None else 0))
-            img = grab(page)
-            c = spot_color(img, spot)
-            b = blob_area(img, c, tol=24)
-            log(f"  t+{dt:.1f}s spot color={c} blob={b}")
-            if 8 < b < 0.02 * 1280 * 800:
-                found = (c, b)
-                break
-        if found:
-            c, b = found
-            log(f"SPAWN DETECTED at {spot}: color={c} blob={b}")
+        time.sleep(0.8)
+    # watch for a small territory anywhere
+    deadline = time.time() + watch_s
+    while time.time() < deadline:
+        time.sleep(0.7)
+        img = grab(page)
+        cands = small_territory_colors(img)
+        if cands:
+            c, area = cands[0]
+            log(f"SPAWN DETECTED: color={c} blob={area}")
             return Palette(self_color=PlayerColor("me", *c), enemy_colors=[],
-                           tolerance=24.0, downscale=2)
-        # clear any selection state, try the next spot
-        page.keyboard.press("Escape")
-        time.sleep(0.5)
+                           tolerance=20.0, downscale=2)
     return None
 
 
