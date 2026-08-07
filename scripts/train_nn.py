@@ -42,7 +42,7 @@ CFG_JSON = WEIGHTS / "config.json"
 
 GRID = 16
 CTX_DIM = 3
-DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+DEVICE = torch.device("cpu" if os.environ.get("FORCE_CPU") == "1" else ("cuda" if torch.cuda.is_available() else "cpu"))
 print(f"device: {DEVICE}", flush=True)
 
 SEED = 2026
