@@ -53,6 +53,26 @@ Edit the top of `run_bot.py` (or env vars):
 | `DECISION_HZ` | click decisions per second |
 | `MANUAL_COLOR` | ⭐ your RGB — set this for reliable play |
 
+## Live-test status (via Kaggle API — 5 automated cycles)
+
+The push→auto-run→pull loop works end-to-end (Kaggle API). Five live matches
+were run and analyzed. The honest finding:
+
+- The bot reliably: opens the game, joins Custom Scenario, double-clicks a
+  start position, plays, and reports.
+- **The blocker: the game assigns the player a random color each match, and in
+  our test matches it kept assigning colors that match the map terrain or the
+  leaderboard UI** (dark greens, teal UI, yellow-green terrain). Pixel-vision
+  cannot separate "my 12-pixel territory" from identical-colored terrain/UI.
+- The calibration now: (1) samples the color at the double-click spawn spot
+  (causal — rejects blobs >2% of frame), (2) falls back to the leaderboard
+  swatch (brightness-filtered, whole-row scan), (3) **fails fast with a clear
+  message** instead of playing blind.
+
+**Why MANUAL_COLOR is the answer:** if you pick a vivid color in the editor
+(e.g. pure red) the map never contains it, so calibration is instant and
+exact. One 30-second manual step makes the bot reliable.
+
 ## Local dev
 
 ```bash
