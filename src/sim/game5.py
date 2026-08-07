@@ -21,7 +21,7 @@ class ClickPlayer:
     __slots__ = ("name", "color", "troops", "alive", "rng", "_pending_attack",
                  "last_attack_tick", "bank_ticks", "strategy")
 
-    def __init__(self, name: str, color: int, seed: int, strategy: str = "meta"):
+    def __init__(self, name: str, color: int, seed: int, strategy: str = "medium"):
         self.name = name
         self.color = color
         self.troops = TroopTracker(balance=512.0, land=12)
@@ -30,13 +30,14 @@ class ClickPlayer:
         self._pending_attack = None
         self.last_attack_tick = -999
         self.bank_ticks = 0
-        self.strategy = strategy
+        self.strategy = strategy  # easy / medium / hard
 
 
 class ClickSim5:
     def __init__(self, h: int = 130, w: int = 170, n_bots: int = 3, seed: int = 1,
-                 max_ticks: int = 1800, clicks_per_tick: int = 12):
+                 max_ticks: int = 1800, clicks_per_tick: int = 12, bot_skill: str = "medium"):
         self.h, self.w = h, w
+        self.bot_skill = bot_skill
         self.rng = np.random.default_rng(seed)
         self.tick = 0
         self.max_ticks = max_ticks
@@ -52,7 +53,7 @@ class ClickSim5:
 
         self.players: dict[int, ClickPlayer] = {1: ClickPlayer("OURS", 1, seed)}
         for i in range(n_bots):
-            self.players[2 + i] = ClickPlayer(f"bot{i}", 2 + i, seed + 100 + i)
+            self.players[2 + i] = ClickPlayer(f"bot{i}", 2 + i, seed + 100 + i, strategy=bot_skill)
         self._pids = sorted(self.players)
 
         spots = np.argwhere(self.world == 0)
@@ -278,10 +279,15 @@ class ClickSim5:
             return []
         my_area = st.self_blob.area
         density = pl.troops.balance / max(my_area, 1)
+        skill = pl.strategy
+        cpt = self.clicks_per_tick
+        if skill == "easy":
+            cpt = max(3, int(cpt * 0.5))
+        elif skill == "hard":
+            cpt = min(24, int(cpt * 1.4))
         clicks = []
 
-        # Phase 1: free land adjacent -> expand (but still opportunistic:
-        # if a neighbor is very weak, hit them even mid-expansion — real bots do)
+        # weakest adjacent enemy by balance
         weak_now = None
         if len(st.attack_targets):
             best_bal = float("inf")
@@ -290,28 +296,44 @@ class ClickSim5:
                 if bal < best_bal:
                     best_bal = bal
                     weak_now = (e, bal)
-        if weak_now and weak_now[1] < pl.troops.balance * 0.15 and pl.rng.random() < 0.6:
-            e, _ = weak_now
-            d = (st.attack_targets[:, 0] - e.centroid[0]) ** 2 + (st.attack_targets[:, 1] - e.centroid[1]) ** 2
-            i = int(np.argmin(d))
-            clicks.append(("attack", int(st.attack_targets[i][0]), int(st.attack_targets[i][1]), 8.0 + pl.rng.random() * 4.0))
-            return clicks
+
+        # opportunistic attack on a very weak neighbor (all skills, tuned per skill)
+        if weak_now and weak_now[1] < pl.troops.balance * 0.15:
+            chance = 0.35 if skill == "easy" else (0.7 if skill == "medium" else 0.9)
+            if pl.rng.random() < chance:
+                e, _ = weak_now
+                d = (st.attack_targets[:, 0] - e.centroid[0]) ** 2 + (st.attack_targets[:, 1] - e.centroid[1]) ** 2
+                i = int(np.argmin(d))
+                pct = 6.0 + pl.rng.random() * 4.0
+                clicks.append(("attack", int(st.attack_targets[i][0]), int(st.attack_targets[i][1]), pct))
+                return clicks
+
+        # expand free land
         if len(st.expand_targets) > 0:
-            for i in range(min(self.clicks_per_tick, len(st.expand_targets))):
+            for i in range(min(cpt, len(st.expand_targets))):
                 t = st.expand_targets[i]
                 clicks.append(("expand", int(t[0]), int(t[1]), 0.0))
             return clicks
 
-        # Phase 2+: attack the weakest adjacent enemy.
-        # Meta behavior: bots bank then attack; occasionally FULL SEND when
-        # they have a lot banked (creating the 'just attacked -> weak' window).
+        # combat phase: attack weakest
         if weak_now is not None:
             e, _ = weak_now
             d = (st.attack_targets[:, 0] - e.centroid[0]) ** 2 + (st.attack_targets[:, 1] - e.centroid[1]) ** 2
             i = int(np.argmin(d))
-            if density > 120 and pl.rng.random() < 0.5:
-                pct = 45.0  # full send -> becomes weak afterwards
+            if skill == "easy":
+                if pl.rng.random() < 0.5:
+                    return []  # easy bots sometimes waste a turn
+                pct = 6.0 + pl.rng.random() * 4.0
+            elif skill == "hard":
+                # hard bots attack more decisively and more often
+                if density > 70 or weak_now[1] < pl.troops.balance * 0.2:
+                    pct = 12.0 + pl.rng.random() * 6.0
+                else:
+                    return []
             else:
-                pct = 8.0 + pl.rng.random() * 6.0
+                if density > 120 and pl.rng.random() < 0.5:
+                    pct = 45.0  # medium full-send -> weak window
+                else:
+                    pct = 8.0 + pl.rng.random() * 6.0
             clicks.append(("attack", int(st.attack_targets[i][0]), int(st.attack_targets[i][1]), pct))
         return clicks
