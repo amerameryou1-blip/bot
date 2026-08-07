@@ -73,6 +73,22 @@ were run and analyzed. The honest finding:
 (e.g. pure red) the map never contains it, so calibration is instant and
 exact. One 30-second manual step makes the bot reliable.
 
+## 🏆 Real result (2026-08-07, Kaggle, fully autonomous)
+
+The bot played a real custom-scenario match end-to-end with NO manual steps:
+opened the editor, reset the scenario, clicked Play, **detected its own spawn
+color** (causal — yellow `[240,224,112]`), expanded for 4 minutes, and finished:
+
+```
+1. AureliaBot           61,006   ← the bot, rank #1
+2. Kar-Kiya Dynasty     50,834
+3. British Raj             812
+4. Bruneian Empire         265
+```
+
+Trained weights (evolved in the offline simulator, 8/8 wins vs bots) are
+loaded automatically from `weights/best_weights.json`.
+
 ## Local dev
 
 ```bash
