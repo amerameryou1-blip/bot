@@ -84,36 +84,37 @@ class ClickAction:
 class ClickPlannerConfig:
     def __init__(
         self,
-        expand_pct: float = 12.0,        # slider % used when expanding (doc: 10–15)
-        attack_pct: float = 8.0,         # slider % for normal attacks (doc: 3–10)
-        attack_pct_capped: float = 5.0,  # slider % when near the hard cap (must spend)
-        weak_balance_ratio: float = 0.25,  # enemy with balance < this × mine is weak
-        weak_area_ratio: float = 0.35,     # enemy with area < this × mine is weak
-        spend_density: float = 90.0,       # density at/above which we expand to spend
-        capped_density: float = 130.0,     # density at/above which we MUST spend
-        expand_radius: int = 14,           # neutral-richness radius when choosing a target
+        expand_pct: float = 12.0,          # slider % when expanding into neutral
+        attack_pct: float = 12.0,          # slider % for attacks (meta: 5-20)
+        weak_balance_ratio: float = 0.35,  # enemy balance < this × mine = drained/weak
+        attack_balance_ratio: float = 2.0, # my balance > this × enemy = have 2:1 advantage
+        attack_density: float = 75.0,      # density at which we start attacking (near red ~100)
+        spend_density: float = 90.0,       # expand-to-spend threshold
+        capped_density: float = 130.0,     # must-spend threshold
+        expand_radius: int = 14,           # neutral-richness radius for expand target
     ) -> None:
         self.expand_pct = expand_pct
         self.attack_pct = attack_pct
-        self.attack_pct_capped = attack_pct_capped
         self.weak_balance_ratio = weak_balance_ratio
-        self.weak_area_ratio = weak_area_ratio
+        self.attack_balance_ratio = attack_balance_ratio
+        self.attack_density = attack_density
         self.spend_density = spend_density
         self.capped_density = capped_density
         self.expand_radius = expand_radius
 
 
 class ClickPlanner:
-    """Decides WHERE to click next, using the troop economy + enemy strength.
+    """Combat brain — expand cheap, then ATTACK to eliminate, bank to red.
 
-    Priority:
-      1. near hard cap → must spend: attack weakest adjacent, else expand
-      2. above spend density → convert balance to land (expand)
-      3. healthy → exploit a weak/exhausted neighbor at low %, else expand
-      4. no targets → bank (compound), no wasted clicks
+    Priority (last-survivor meta):
+      1. near hard cap       -> MUST spend: attack best target, else expand
+      2. strong + target     -> attack the weakest/drained neighbor at attack_pct
+      3. neutral available   -> expand (cheap land first, per the meta)
+      4. drained target      -> exploit it even before red interest
+      5. else                -> bank (compound toward red interest ~100/px)
 
-    Enemy balances (from the leaderboard OCR in live play, or the sim's own
-    tracker in testing) make "exhausted neighbor" detection accurate.
+    Enemy balances come from `set_enemy_balances` (sim feeds exact values;
+    live play OCRs the leaderboard). Without them we fall back to area ratio.
     """
 
     def __init__(self, config: ClickPlannerConfig | None = None, tracker: TroopTracker | None = None):
@@ -122,7 +123,6 @@ class ClickPlanner:
         self.enemy_balances: dict[str, float] = {}
 
     def set_enemy_balances(self, balances: dict[str, float]) -> None:
-        """feed {enemy_label: balance} — e.g. OCR'd from the leaderboard."""
         self.enemy_balances = dict(balances)
 
     def decide(self, state: FrameState) -> ClickAction:
@@ -135,85 +135,112 @@ class ClickPlanner:
         balance = self.tracker.balance
         land = max(me.area, 1)
         density = balance / land
+        target = self._pick_target(state)
 
-        # weak enemies: by area (balance estimates from leaderboard are added
-        # by the caller via tracker/enemy snapshot when available)
-        weak_adjacent = self._weakest_adjacent(state)
-
-        # 1) near hard cap — MUST spend troops (interest is dead anyway)
+        # 1) near hard cap — MUST spend troops (interest dead anyway)
         if density >= cfg.capped_density:
-            if weak_adjacent is not None and len(state.attack_targets):
-                t = self._pick_attack_target(state, weak_adjacent)
-                return ClickAction("attack", t[1], t[0], cfg.attack_pct_capped,
-                                   reason=f"capped(d={density:.0f})->{weak_adjacent.label}")
+            if target is not None:
+                return ClickAction("attack", target[1], target[2], cfg.attack_pct,
+                                   reason=f"capped->attack({target[2]})")
             if len(state.expand_targets):
                 t = self._pick_expand_target(state)
                 return ClickAction("expand", t[1], t[0], reason=f"capped->expand(d={density:.0f})")
-            return ClickAction("bank", reason=f"capped-no-target(d={density:.0f})")
+            return ClickAction("bank", reason=f"capped(d={density:.0f})")
 
-        # 2) above spend density — convert balance to land while we can
+        # 2) a DRAINED enemy (e.g. bot just full-sent) — exploit even early.
+        #    This is THE meta kill: attack right after they overspend.
+        if target is not None and self._is_drained(target):
+            return ClickAction("attack", target[1], target[2], cfg.attack_pct,
+                               reason=f"drained({target[2]})")
+
+        # 3) we have an attackable target and are at/near the attack density
+        if target is not None and density >= cfg.attack_density:
+            return ClickAction("attack", target[1], target[2], cfg.attack_pct,
+                               reason=f"attack({target[2]},d={density:.0f})")
+
+        # 4) cheap neutral land first (the meta: expand before attacking)
+        if len(state.expand_targets) and density < cfg.spend_density:
+            t = self._pick_expand_target(state)
+            return ClickAction("expand", t[1], t[0], reason=f"grow(d={density:.0f})")
+
+        # 5) above spend density — convert balance to land
         if density >= cfg.spend_density:
             if len(state.expand_targets):
                 t = self._pick_expand_target(state)
                 return ClickAction("expand", t[1], t[0], reason=f"spend(d={density:.0f})")
-            if weak_adjacent is not None and len(state.attack_targets):
-                t = self._pick_attack_target(state, weak_adjacent)
-                return ClickAction("attack", t[1], t[0], cfg.attack_pct_capped,
-                                   reason=f"spend->attack({weak_adjacent.label})")
-            return ClickAction("bank", reason=f"spend-no-target(d={density:.0f})")
+            if target is not None:
+                return ClickAction("attack", target[1], target[2], cfg.attack_pct,
+                                   reason=f"spend->attack({target[2]})")
 
-        # 3) healthy economy — exploit exhausted neighbors, else expand
-        if weak_adjacent is not None and len(state.attack_targets):
-            t = self._pick_attack_target(state, weak_adjacent)
-            return ClickAction("attack", t[1], t[0], cfg.attack_pct,
-                               reason=f"exploit({weak_adjacent.label})")
-        if len(state.expand_targets):
-            t = self._pick_expand_target(state)
-            return ClickAction("expand", t[1], t[0], reason=f"grow(d={density:.0f})")
-
-        # 4) nothing to do — bank and compound
+        # 6) bank and compound toward red interest
         return ClickAction("bank", reason=f"idle(d={density:.0f})")
 
-    # -- helpers -----------------------------------------------------------
+    # -- target selection ---------------------------------------------------
 
-    def _weakest_adjacent(self, state: FrameState) -> Blob | None:
-        """Weakest enemy that shares a border with me (has attack targets).
+    def _pick_target(self, state: FrameState):
+        """Best adjacent enemy to attack, or None.
 
-        Weak = lowest BALANCE when we know enemy balances (leaderboard/sim);
-        otherwise lowest area ratio. An exhausted enemy (balance near 0) is the
-        doc's 'exploit' target even if its territory looks big.
-        """
+        We need a shared border (attack targets exist) AND the balance
+        advantage (~2:1 per the defender rule). Among valid targets, pick the
+        one with the LOWEST balance (the drained one — easiest kill)."""
         if not state.attack_targets.any():
             return None
-        me_area = max(state.self_blob.area, 1)
         me_balance = self.tracker.balance
-        best: Blob | None = None
-        best_score = float("inf")
+        cfg = self.config
+        best = None  # (blob, target_y, target_x, label)
+        best_bal = float("inf")
         for e in state.enemies:
             if e.area <= 0:
                 continue
-            if self.enemy_balances:
-                bal = self.enemy_balances.get(e.label, float("inf"))
-                # exhausted = balance far below mine; avoid attacking rich enemies
-                if bal < me_balance * self.config.weak_balance_ratio:
-                    score = bal
-                    if score < best_score:
-                        best_score = score
-                        best = e
+            bal = self.enemy_balances.get(e.label) if self.enemy_balances else None
+            if bal is not None:
+                # need ~2:1 advantage (defender bonus) unless enemy is drained
+                if bal > me_balance * cfg.attack_balance_ratio and bal > me_balance * cfg.weak_balance_ratio:
+                    continue
+                score = bal
             else:
-                ratio = e.area / me_area
-                if ratio < self.config.weak_area_ratio and ratio < best_score:
-                    best_score = ratio
-                    best = e
+                # fallback: small area ratio
+                if e.area > state.self_blob.area * 0.6:
+                    continue
+                score = e.area
+            if score < best_bal:
+                best_bal = score
+                ty, tx = self._border_point(state, e)
+                if ty is None:
+                    continue
+                best = (e, tx, ty, e.label)
         return best
 
+    def _is_drained(self, target) -> bool:
+        if not self.enemy_balances:
+            return False
+        bal = self.enemy_balances.get(target[3])
+        return bal is not None and bal < self.tracker.balance * self.config.weak_balance_ratio
+
+    def _border_point(self, state: FrameState, enemy: Blob):
+        """A pixel of `enemy` adjacent to me, closest to my centroid."""
+        me = state.self_blob
+        cy, cx = me.centroid
+        targets = state.attack_targets
+        best_idx, best_d = None, float("inf")
+        for i, (ty, tx) in enumerate(targets):
+            # must be on this enemy's border (approx: near its centroid)
+            if abs(ty - enemy.centroid[0]) > 80 or abs(tx - enemy.centroid[1]) > 80:
+                continue
+            d = (ty - cy) ** 2 + (tx - cx) ** 2
+            if d < best_d:
+                best_d, best_idx = d, i
+        if best_idx is None:
+            return None, None
+        ty, tx = targets[best_idx]
+        return float(ty), float(tx)
+
     def _pick_expand_target(self, state: FrameState) -> tuple[float, float]:
-        """Expand target with the richest neutral neighborhood (vectorized)."""
+        """Expand target with the richest neutral neighborhood."""
         targets = state.expand_targets
         h, w = state.shape
         neutral = state.neutral_mask
         radius = int(self.config.expand_radius)
-        # count neutral pixels in a square window around each target
         best_idx, best_score = 0, -1
         for i, (ty, tx) in enumerate(targets):
             y0, y1 = max(0, int(ty) - radius), min(h, int(ty) + radius)
@@ -223,21 +250,6 @@ class ClickPlanner:
                 best_score, best_idx = score, i
         ty, tx = targets[best_idx]
         return float(ty), float(tx)
-
-    def _pick_attack_target(self, state: FrameState, enemy: Blob) -> tuple[float, float]:
-        """Attack target on the given enemy's border (closest to my centroid)."""
-        me = state.self_blob
-        cy, cx = me.centroid
-        targets = state.attack_targets
-        best_idx, best_d = 0, float("inf")
-        for i, (ty, tx) in enumerate(targets):
-            d = (ty - cy) ** 2 + (tx - cx) ** 2
-            if d < best_d:
-                best_d, best_idx = d, i
-        ty, tx = targets[best_idx]
-        return float(ty), float(tx)
-
-    # economy passthroughs --------------------------------------------------
 
     def set_observed_balance(self, balance: float) -> None:
         """Overwrite the estimated balance with the leaderboard OCR value."""

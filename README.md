@@ -1,15 +1,27 @@
-# 🤖 Territorial.io Bot
+# 🤖 Territorial.io Bot — Custom Scenario (COMBAT brain, last-survivor)
 
-A lightweight AI bot for territorial.io **Custom Scenario** (single-player vs bots).
-The game works on **double-click**: double-click land to expand, set the attack-%
-slider (W/S/D/A) and double-click an enemy border to attack.
+**Goal: WIN — be the last survivor** (not just expand). The bot expands cheap
+land first, then ATTACKS (drained enemies at the meta %), banks to red interest,
+and keeps killing until everyone else is gone.
+
+The combat brain is **trained by evolution** in a combat-correct simulator
+(defender 2:1, attack %, elimination -> neutral land, bots that full-send):
+`scripts/train_weights.py` evolves the weights to maximize **last-survivor win
+rate**; the best weights live in `weights/best_weights.json` and load
+automatically. Live play also OCRs the leaderboard to target DRAINED enemies
+(the meta: hit them right after they overspend).
 
 - **Vision** — color segmentation → territory map + expand/attack click targets
-- **Brain** — `ClickPlanner`: economy-aware (interest 0.56s, income 5.6s, soft/hard
-  density limits, 2:1 defender advantage), expands at low %, exploits exhausted neighbors
-- **Calibration** — automatic per-match color from the leaderboard swatch (OCR);
-  colors change every match, so nothing is hardcoded
-- **Offline** — 42 unit tests + a click simulator (`scripts/click_tournament.py`)
+- **Brain** — `ClickPlanner` combat: expand cheap, attack drained, bank to red
+- **Calibration** — automatic per-match color from the leaderboard swatch (OCR)
+- **Offline** — 43 unit tests + combat simulator + trainer + validator
+
+## ⭐ Where is the trained AI stored?
+
+- **GitHub** (this repo, `weights/best_weights.json`) — enough for the current
+  evolutionary weights (tiny JSON). **No Hugging Face needed.**
+- **Hugging Face** becomes the right home only if we upgrade to a real neural
+  network (PyTorch weights, model cards) — then I'd ask for an HF token.
 
 ## Run on Kaggle — ONE CELL
 

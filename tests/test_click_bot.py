@@ -124,14 +124,41 @@ def test_clickplanner_banks_when_no_targets():
     assert act.kind == "bank"
 
 
-def test_clickplanner_attacks_weak_neighbor():
-    # small enemy ADJACENT to my big territory → attack
-    state = build_state(h=240, w=320, self_center=(120, 160), self_radius=40,
-                        enemies=[((120, 208), 10)])
-    planner = ClickPlanner()
+def test_clickplanner_attacks_drained_neighbor():
+    # No neutral land left + a DRAINED adjacent enemy (very low balance) ->
+    # attack (the meta: exploit bots right after they full-send).
+    h, w = 120, 160
+    labels = np.ones((h, w), dtype=int)  # all mine
+    labels[40:50, 60:70] = 2             # small enemy patch (adjacent to me)
+    from bot.state import Blob, FrameState
+    from bot.vision import find_attack_targets, find_expand_targets
+    me_mask = labels == 1
+    em = labels == 2
+    mc = np.argwhere(me_mask)
+    me = Blob("me", me_mask, len(mc), (float(mc[:, 0].mean()), float(mc[:, 1].mean())))
+    ec = np.argwhere(em)
+    enemy = Blob("e2", em, len(ec), (float(ec[:, 0].mean()), float(ec[:, 1].mean())))
+    attack = find_attack_targets(me_mask, em, max_samples=50)
+    state = FrameState(shape=(h, w), labels=labels, self_blob=me, enemies=[enemy],
+                       frontiers=np.zeros((0, 2), dtype=int),
+                       expand_targets=np.zeros((0, 2), dtype=int), attack_targets=attack)
+    tracker = TroopTracker(balance=5000, land=5000)
+    planner = ClickPlanner(ClickPlannerConfig(), tracker)
+    planner.set_enemy_balances({"e2": 100})  # enemy is drained
     act = planner.decide(state)
     assert act.kind == "attack"
-    assert 0 < act.pct <= 20  # low slider %, per the doc's exploit heuristic
+    assert 0 < act.pct <= 25  # low slider %, per the meta
+
+
+def test_clickplanner_expands_before_attacking_rich_neighbor():
+    # healthy economy + neutral land + a RICH enemy -> expand first (meta:
+    # cheap land before costly attacks)
+    state = build_state(h=240, w=320, self_center=(120, 160), self_radius=40,
+                        enemies=[((120, 208), 10)])
+    planner = ClickPlanner(ClickPlannerConfig(), TroopTracker(balance=1000, land=200))
+    planner.set_enemy_balances({"e2": 5000})  # enemy is rich -> don't attack
+    act = planner.decide(state)
+    assert act.kind == "expand"
 
 
 def test_clickplanner_spends_when_near_cap():

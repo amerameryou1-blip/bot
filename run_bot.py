@@ -78,6 +78,106 @@ def grab(page) -> np.ndarray:
     return np.array(Image.open(io.BytesIO(page.screenshot())).convert("RGB"))
 
 
+def leaderboard_balances(page, palette=None) -> dict:
+    """OCR the leaderboard: {player_name: balance} for every row, plus the
+    swatch color per row. Lets the bot know who is DRAINED (the meta kill).
+
+    Returns (balances_by_name, swatch_by_name).
+    """
+    from bot.calibration import _ocr_words, swatch_from_strip
+    try:
+        img = grab(page)
+        words = _ocr_words(img)
+        if not words:
+            return {}, {}
+        # group into rows by y
+        rows = []
+        for w in words:
+            t, x, y, ww, hh = w
+            for r in rows:
+                if abs(r["y"] - y) < 14:
+                    r["words"].append(w)
+                    r["y"] = min(r["y"], y)
+                    break
+            else:
+                rows.append({"y": y, "words": [w]})
+        balances, swatches = {}, {}
+        for row in rows:
+            ws = sorted(row["words"], key=lambda w: w[1])
+            # name = leftmost word; balance = rightmost numeric word
+            name = ws[0][0]
+            nums = [w[0] for w in ws if w[0].isdigit()]
+            bal = int(nums[-1]) if nums else None
+            # swatch color: brightest saturated color left of the name
+            nx = ws[0][1]
+            ny = row["y"]
+            nh = max((w[4] for w in ws), default=12)
+            band = img[ny:ny + max(nh + 6, 12), max(0, nx - 60):max(0, nx - 2)].reshape(-1, 3).astype(int)
+            sw = swatch_from_strip(band, bright_min=120)
+            if bal is not None:
+                balances[name] = bal
+            if sw is not None:
+                swatches[name] = sw
+        return balances, swatches
+    except Exception:
+        return {}, {}
+
+
+def discover_enemies(img, self_rgb, max_enemies=8):
+    """Find enemy territory colors in the frame (vivid, moderate blobs, not
+    terrain/UI, not our color). Needed so segment() finds attack targets."""
+    from bot.calibration import saturated_colors, blob, edges_touched, dominant_colors
+    H, W = img.shape[:2]
+    dom = dominant_colors(img, n=6, min_frac=0.03)
+    enemies = []
+    for c in saturated_colors(img, max_colors=40):
+        if tuple(c) == tuple(self_rgb):
+            continue
+        if any(np.all(np.abs(np.array(c) - np.array(d)) <= 24) for d in dom):
+            continue  # terrain/UI
+        b = blob(img, c, tol=20, min_area=15)
+        if not b or b["area"] > 0.4 * H * W or edges_touched(b["mask"]) >= 3:
+            continue
+        coords = np.argwhere(b["mask"])
+        if len(coords):
+            if coords[:, 0].mean() > 730 or (coords[:, 0].mean() < 340 and coords[:, 1].mean() < 500):
+                continue  # bottom UI / leaderboard
+        enemies.append(PlayerColor(f"e{len(enemies)}", *c))
+        if len(enemies) >= max_enemies:
+            break
+    return enemies
+
+
+def feed_balances(page, planner, bot_name, palette=None) -> None:
+    """Feed OCR'd balances into the planner: our balance (exact density) and
+    enemy balances keyed by blob color (drained-target detection)."""
+    balances, swatches = leaderboard_balances(page)
+    if not balances:
+        return
+    my_bal = None
+    for name, bal in balances.items():
+        if name.lower() == bot_name.lower() or name.lower().startswith(bot_name.lower()[:5]):
+            my_bal = bal
+    if my_bal:
+        planner.set_observed_balance(float(my_bal))
+    # map each palette enemy (label+color) to its OCR'd balance via swatch color
+    if palette and swatches and palette.enemy_colors:
+        enemy_balances = {}
+        for enemy in palette.enemy_colors:
+            rgb = tuple(enemy.rgb)
+            best_name, best_d = None, 1e9
+            for name, sw in swatches.items():
+                if name.lower() == bot_name.lower() or name.lower().startswith(bot_name.lower()[:5]):
+                    continue
+                d = (sw[0] - rgb[0]) ** 2 + (sw[1] - rgb[1]) ** 2 + (sw[2] - rgb[2]) ** 2
+                if d < best_d:
+                    best_d, best_name = d, name
+            if best_name and best_d < 3 * 48 * 48:
+                enemy_balances[enemy.name] = float(balances[best_name])
+        if enemy_balances:
+            planner.set_enemy_balances(enemy_balances)
+
+
 def land_spots(img, n=10) -> list[tuple[int, int]]:
     """Candidate land pixels (not ocean, not leaderboard/bottom UI)."""
     px = img.astype(int)
@@ -299,14 +399,24 @@ def main() -> None:
             snapshot(page, "calib_fail")
             browser.close()
             sys.exit(1)
+        # discover enemy colors so segment() finds attack targets
+        img = grab(page)
+        enemy_colors = discover_enemies(img, tuple(palette.self_color.rgb))
+        log(f"discovered {len(enemy_colors)} enemy colors: "
+            f"{[tuple(e.rgb) for e in enemy_colors]}")
+        palette = Palette(self_color=palette.self_color, enemy_colors=enemy_colors,
+                          tolerance=24.0, downscale=2)
 
-        # 4) play with the trained brain
+        # 4) play with the trained combat brain
         planner = make_planner()
         controls = MouseControls(page)
-        report = {"areas": []}
+        report = {"areas": [], "eliminations": []}
         action_counts: dict[str, int] = {}
         start = time.time()
         last_shot = time.time()
+        last_ocr = time.time()
+        last_enemies = set()
+        eliminated = 0
         log(f"BOT PLAYING for {PLAY_MINUTES} min...")
         while time.time() - start < PLAY_MINUTES * 60:
             loop = ClickLoop(capture=lambda: grab(page), palette=palette, brain=planner,
@@ -322,14 +432,46 @@ def main() -> None:
                 if st.self_blob:
                     report["areas"].append({"t": round(time.time() - start, 1),
                                             "area": st.self_blob.area})
+                    # enemy elimination detection: a palette enemy label vanishes
+                    now = {e.label for e in st.enemies}
+                    gone = last_enemies - now
+                    if gone:
+                        for g in gone:
+                            eliminated += 1
+                            log(f">>> ENEMY ELIMINATED: {g} (total {eliminated})")
+                            report["eliminations"].append({"t": round(time.time() - start, 1), "enemy": g})
+                    last_enemies = now
+                else:
+                    log(">>> WE WERE ELIMINATED")
+                    break
             except Exception:
                 pass
+            # feed live balances (exact density + drained-enemy targeting) and
+            # rediscover enemy colors (they appear/grow over time)
+            if time.time() - last_ocr > 6:
+                feed_balances(page, planner, BOT_NAME, palette)
+                try:
+                    img2 = grab(page)
+                    en = discover_enemies(img2, tuple(palette.self_color.rgb))
+                    if en:
+                        palette = Palette(self_color=palette.self_color, enemy_colors=en,
+                                          tolerance=24.0, downscale=2)
+                except Exception:
+                    pass
+                last_ocr = time.time()
             if time.time() - last_shot > 5:
                 snapshot(page)
                 last_shot = time.time()
 
         report["max_area"] = max([a["area"] for a in report["areas"]], default=0)
         report["actions"] = dict(sorted(action_counts.items(), key=lambda kv: -kv[1]))
+        # last-survivor check: no enemies detected in the final frame
+        try:
+            final_img = grab(page)
+            enemies_left = discover_enemies(final_img, tuple(palette.self_color.rgb))
+            report["last_survivor"] = len(enemies_left) == 0
+        except Exception:
+            report["last_survivor"] = False
         log("===== BATTLE REPORT =====")
         log(json.dumps(report, indent=2))
         with open(os.path.join(OUT, "battle_report.json"), "w") as f:
