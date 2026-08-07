@@ -116,3 +116,47 @@ python3 run_bot.py                                  # play a match locally
 - Headless Chromium only repaints the canvas after input events → the bot
   screenshots right after its own clicks.
 - Botting may violate territorial.io's ToS — use in bot rooms / casually.
+
+---
+
+## 🧠 Neural training plan (decision: easy→medium→hard, never start impossible)
+
+**Question asked: train vs easy bots first or impossible?**
+**Answer: EASY → MEDIUM → HARD curriculum. NEVER start at impossible.**
+
+Why:
+- An RL agent learns from reward. Vs **impossible** bots it never wins → zero
+  positive signal → learns nothing (or hides in a corner).
+- Vs **easy** bots it wins reliably → strong signal → learns what winning looks like.
+- **Trap:** too-easy bots that never fight = matches never end = no win/loss
+  signal at all. So even "easy" bots must attack (our sim bots full-send).
+- **Clone stage:** collect vs easy/medium (teacher wins 8/8 → dataset is full of
+  WINNING decisions → CNN imitates good play). Vs impossible the teacher loses →
+  dataset would teach the CNN to lose.
+
+**Curriculum:**
+1. Clone — vs easy/medium bots (teacher wins) → CNN learns good decisions
+2. PPO — start vs medium (matches resolve, agent gets wins AND losses), ramp to
+   hard with adaptive difficulty (win>70% → harder; win<40% → easier)
+3. Validate — final eval vs hard bots
+
+## ⚡ GPU-hour maximization (Kaggle bills by hour, not usage)
+
+One session, EVERYTHING parallel — not multiple tabs (tabs can't share a GPU):
+- **GPU:** trains continuously (vision → clone → PPO), never idle
+- **CPU multiprocessing:** generates fresh training data WHILE the GPU trains
+  (simulated matches stream into training)
+- **CPU parallel:** evaluations run concurrently
+- Result: GPU pegged ~100% for the whole session
+
+## 📊 Current progress to "reliably wins vs bots": ~30%
+
+| Done | Not done |
+|---|---|
+| Real PyTorch CNN (seg/localize/policy/value) | GPU training (never ran) |
+| Combat sim + meta teacher (8/8) | PPO stage (never trained) |
+| Clone + PPO code written | Kaggle GPU session (never ran) |
+| Live NN pipeline wired | Live validation |
+
+Code ~70% written; **winning capability ~30%** — the missing piece is GPU
+training (especially the RL stage), which is a compute problem, not code.
