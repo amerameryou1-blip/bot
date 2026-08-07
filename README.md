@@ -7,6 +7,15 @@ must WIN AS **LAST SURVIVOR** (by elimination — NOT biggest area).
 
 ---
 
+> ## ⚡ OVERNIGHT SESSION PROGRESS (2026-08-07, autonomous)
+> - ✅ **Zoom blocker FIXED** — numeric proof: self blob 0.3-0.5% → 1.2-1.9% in window, ≥2 enemies; ~80% PASS by batch 3
+> - ✅ **19 real matches recorded** (~4,200 frames + clicks) → HF `recordings/` (13/13 verified; b3 in flight)
+> - ✅ **Auto-labeler validated on real data**: 1,509 frames → real_vision.npz (uint8, 6.8MB), 5-class labels + click targets
+> - ✅ **2 real last-survivor wins**; attack config now aggressive (density 42, ratio 1.5, pct 15)
+> - 🚀 **GPU training RUNNING** on Kaggle `bot-train-nn` (collect → vision → clone → real → PPO → eval → export)
+> - 🔧 Fixed: menu nav/lobby bug, Reset-Scenario exits editor, notebook kernels don't auto-execute via API (script kernels do), Kaggle attach timing, secret-scan
+> - 📦 Data flow: sandbox records → private Kaggle dataset → migration kernel → HF (HF IP-blocked from sandbox)
+
 ## 🔄 LIVE STATUS — 2026-08-07 (overnight autonomous session)
 
 ### ✅ THE #1 BLOCKER IS FIXED — CAMERA / ZOOM
