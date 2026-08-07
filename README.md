@@ -36,7 +36,15 @@ Map
 
 **Training run:** Kaggle GPU notebook `amerameryou/bot-train-nn` (T4 GPU, Internet on)
 **Pipeline:** collect (CPU-parallel, medium bots) → vision (GPU) → clone (GPU) → PPO (GPU, curriculum medium→hard) → HF upload
-**Status (v7 relaunch, 5 concurrent sessions):** all RUNNING — last checked 2026-08-07 ~16:10 UTC
+**Status (v7):** main trainer RUNNING — 4 data workers COMPLETE ✅ — last checked 2026-08-07 ~16:30 UTC
+
+**Reusable data saved to Hugging Face (for future bigger models):**
+`amer224/territorial-bot-data` (dataset repo, private) — pull anytime with
+`scripts/merge_worker_data.py` (HF_TOKEN):
+- island: 2,235 samples · mountains: 2,445 · desert: 2,356 · swamp: 2,407
+- ~9,400 samples / ~120MB across 4 map types + the lakes data from the main run
+- Regenerate/extend anytime by running the worker notebooks again (different seeds/maps)
+
 
 **v7 fixes (from the v6 run that finished but didn't learn — alive was 0.00 the whole time):**
 - **Reward fix:** added a per-step survival bonus (+0.02) + bigger growth signal.
