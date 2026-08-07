@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
-"""Territorial.io bot — run this on Kaggle (or anywhere) to play a match.
+"""Territorial.io bot — FULLY AUTONOMOUS.
 
-The game works on DOUBLE-CLICK (confirmed by the player): double-click land to
-expand, set the attack-% slider (W/S/D/A) and double-click an enemy border to
-attack. This script:
+The bot:
   1. opens territorial.io in headless Chromium
-  2. Custom Scenario -> Play
-  3. double-clicks a start position
-  4. calibrates YOUR color (leaderboard swatch OCR, or MANUAL_COLOR)
-  5. plays with ClickPlanner + MouseControls for PLAY_MINUTES
-  6. writes battle_report.json + frames
+  2. chooses its OWN vivid color in the Custom Scenario editor (no OCR needed)
+  3. loads TRAINED weights (weights/best_weights.json — evolved in the offline
+     simulator to maximize win rate vs bots)
+  4. joins Custom Scenario -> Play, double-clicks a start position
+  5. plays with ClickPlanner + MouseControls (double-click to expand/attack)
+  6. writes battle_report.json + frames + bot.log
 
-Run:  python run_bot.py
+Run:  python run_bot.py   (config via env vars, see CONFIG below)
 """
 import sys, os, io, time, json
 
-# allow `python run_bot.py` from anywhere in the repo
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 import numpy as np
@@ -28,18 +26,16 @@ PLAY_MINUTES = float(os.environ.get("PLAY_MINUTES", "4"))
 DECISION_HZ = float(os.environ.get("DECISION_HZ", "2.5"))  # click decisions per second
 MAX_FRAMES_KEEP = 60
 _MANUAL = os.environ.get("MANUAL_COLOR", "").strip()
-MANUAL_COLOR = json.loads(_MANUAL) if _MANUAL else None
-# ^ RELIABLE WAY: in the Custom Scenario editor pick a VIVID color for yourself
-#   (Settings -> Colors), then set MANUAL_COLOR = "[r, g, b]" (e.g. "[255, 60, 60]").
-#   The game can assign you a color that matches the map terrain, which breaks
-#   pixel vision — a vivid manual color avoids that entirely.
+MANUAL_COLOR = json.loads(_MANUAL) if _MANUAL else None  # optional override
 
-# output dir: Kaggle working dir if present, else ./bot_output
+# The bot's own vivid color, chosen in the editor (vivid red — never on maps).
+SELF_RGB = [255, 60, 60]
+# ---------------------------------------------------------------------------
+
 OUT = os.environ.get("KAGGLE_WORKING", "/kaggle/working") if os.path.isdir("/kaggle/working") else os.path.join(
     os.path.dirname(os.path.abspath(__file__)), "bot_output")
 os.makedirs(OUT, exist_ok=True)
 LOG = os.path.join(OUT, "bot.log")
-# ---------------------------------------------------------------------------
 
 from playwright.sync_api import sync_playwright
 
@@ -48,7 +44,7 @@ from bot.planner import ClickPlanner, ClickPlannerConfig
 from bot.economy import TroopTracker
 from bot.controls import MouseControls
 from bot.click_loop import ClickLoop
-from bot.calibration import calibrate_from_leaderboard, center_lock_calibrate, _ocr_words, find_name_box
+from bot.calibration import calibrate_from_leaderboard, center_lock_calibrate
 
 FLAGS = [
     "--no-sandbox", "--disable-dev-shm-usage", "--use-gl=swiftshader", "--disable-gpu",
@@ -92,71 +88,41 @@ def land_spot(img) -> tuple[int, int]:
     return (int(xs[len(ys) // 2]), int(ys[len(ys) // 2])) if len(ys) else (640, 400)
 
 
-def ocr_balance(page) -> int | None:
-    """Best-effort: my balance from the leaderboard row (OCR)."""
+# ==== 1. SELF-COLOR: pick our own vivid color in the editor ==================
+# Editor layout (verified live): Custom Scenario -> Colors Settings (1115,242)
+# -> Customized (50,204) -> RGB fields at (351,187)/(351,211)/(351,235).
+def set_own_color(page) -> bool:
     try:
-        img = grab(page)
-        words = _ocr_words(img)
-        box, _ = find_name_box(words, BOT_NAME)
-        if box is None:
-            return None
-        _, nx, ny, nw, nh = box
-        row = [w for w in words if abs(w[2] - ny) < 12 and w[1] > nx + nw]
-        nums = [int(w[0]) for w in row if w[0].isdigit()]
-        return nums[0] if nums else None
-    except Exception:
-        return None
+        page.mouse.click(714, 411)   # Custom Scenario
+        time.sleep(3.5)
+        page.mouse.click(1115, 242)  # Colors Settings
+        time.sleep(3)
+        page.mouse.click(50, 204)    # Customized
+        time.sleep(3)
+        for y, val in [(187, SELF_RGB[0]), (211, SELF_RGB[1]), (235, SELF_RGB[2])]:
+            page.mouse.click(351, y)
+            time.sleep(0.6)
+            page.keyboard.press("Control+A")
+            page.keyboard.type(str(val))
+            time.sleep(0.4)
+            page.keyboard.press("Enter")
+            time.sleep(1.0)
+        log(f"set own color to {SELF_RGB}")
+        return True
+    except Exception as e:
+        log(f"set_own_color failed: {e}")
+        return False
 
 
-def color_at_spot(img, spot) -> list[int] | None:
-    """My territory spawns exactly where I double-clicked. Sample the brightest
-    saturated color in a patch around that spot — that's my color."""
-    from collections import Counter
-    x, y = spot
-    h, w = img.shape[:2]
-    x0, x1 = max(0, x - 16), min(w, x + 16)
-    y0, y1 = max(0, y - 16), min(h, y + 16)
-    patch = img[y0:y1, x0:x1].reshape(-1, 3).astype(int)
-    q = (patch // 16 * 16)
-    counts = Counter(map(tuple, q))
-    cands = [(list(c), n) for c, n in counts.most_common(10)
-             if max(c) > 120 and (max(c) - min(c)) > 50]
-    if not cands:
-        return None
-    cands.sort(key=lambda x: -x[1])
-    return cands[0][0]
-
-
-def calibrate(page, spot=None) -> Palette | None:
+def calibrate(page, know_color=None) -> Palette | None:
+    """We KNOW our color (self-chosen); this is just a sanity fallback chain."""
+    if know_color is not None:
+        return Palette(self_color=PlayerColor("me", *know_color), enemy_colors=[],
+                       tolerance=24.0, downscale=2)
     if MANUAL_COLOR is not None:
-        log(f"using MANUAL_COLOR {MANUAL_COLOR}")
         return Palette(self_color=PlayerColor("me", *MANUAL_COLOR), enemy_colors=[],
                        tolerance=24.0, downscale=2)
-    # PRIMARY: my territory spawns at the double-click spot — sample it there.
-    # This is CAUSAL (my click made that color appear), so we only require a
-    # compact blob near the spot — no dominance check (the color may legitimately
-    # resemble terrain elsewhere on the map).
-    if spot is not None:
-        img = grab(page)
-        color = color_at_spot(img, spot)
-        if color is not None:
-            from bot.calibration import blob, edges_touched
-            b = blob(img, color, tol=24, min_area=6)
-            if b:
-                H, W = img.shape[:2]
-                frac = b["area"] / (H * W)
-                near_spot = abs(b["cx"] - spot[0]) < 120 and abs(b["cy"] - spot[1]) < 120
-                # A starting territory + aura is small (<2% of frame). A huge
-                # blob means the sampled color is TERRAIN, not my territory.
-                if frac < 0.02 and edges_touched(b["mask"]) < 3 and near_spot:
-                    log(f"CALIBRATED via spawn-spot: {color} (area={b['area']})")
-                    return Palette(self_color=PlayerColor("me", *color), enemy_colors=[],
-                                   tolerance=24.0, downscale=2)
-                log(f"spawn-spot color {color}: blob invalid (area={b['area']}, frac={frac:.3f}, near_spot={near_spot})")
-            else:
-                log(f"spawn-spot color {color}: no blob found")
-    # FALLBACK: leaderboard swatch
-    log("calibrating from leaderboard (fallback)...")
+    log("self-color not set — falling back to leaderboard OCR")
     for attempt in range(4):
         img = grab(page)
         pal, reason = calibrate_from_leaderboard(img, BOT_NAME)
@@ -171,6 +137,30 @@ def calibrate(page, spot=None) -> Palette | None:
     return None
 
 
+# ==== 2. TRAINED WEIGHTS: evolve ClickPlannerConfig in the offline sim =======
+def load_weights() -> dict:
+    """Load trained weights (JSON) if present; {} otherwise."""
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "weights", "best_weights.json")
+    try:
+        with open(path) as f:
+            w = json.load(f)
+        log(f"loaded trained weights: {w}")
+        return w
+    except Exception:
+        log("no weights file — using defaults")
+        return {}
+
+
+def make_planner() -> ClickPlanner:
+    cfg = ClickPlannerConfig()
+    weights = load_weights()
+    for k, v in weights.items():
+        if hasattr(cfg, k):
+            setattr(cfg, k, float(v))
+    return ClickPlanner(cfg, TroopTracker(balance=512.0, land=12))
+
+
+# ==== 3. MAIN =================================================================
 def main() -> None:
     with open(LOG, "w") as f:
         f.write("bot session\n")
@@ -186,6 +176,7 @@ def main() -> None:
             page.fill('input[placeholder*="Kingdom"], input', BOT_NAME)
         except Exception:
             pass
+        time.sleep(1)
 
         def btn(text):
             els = page.evaluate("""() => Array.from(document.querySelectorAll('button')).map((el) => {
@@ -194,11 +185,17 @@ def main() -> None:
             })""")
             return next((e for e in els if text in e["text"]), None)
 
-        cs = btn("Custom Scenario")
-        if cs:
-            page.mouse.click(cs["x"], cs["y"])
-            log("clicked Custom Scenario")
-        time.sleep(4)
+        # 1) choose our own color (also lands us in the editor)
+        ok_color = set_own_color(page)
+        if not ok_color:
+            # try again via DOM buttons
+            cs = btn("Custom Scenario")
+            if cs:
+                page.mouse.click(cs["x"], cs["y"])
+                time.sleep(3)
+        time.sleep(1)
+
+        # 2) Play
         play = btn("Play")
         if play:
             page.mouse.click(play["x"], play["y"])
@@ -209,35 +206,23 @@ def main() -> None:
             sys.exit(1)
         time.sleep(6)
 
-        # ---- start position: double-click land, retry a few spots ----
-        palette = None
-        for spot_attempt in range(6):
-            img = grab(page)
-            spot = land_spot(img)
-            # vary the spot a bit each attempt in case the first was water/blocked
-            if spot_attempt > 0:
-                h, w = img.shape[:2]
-                spot = (min(w - 10, spot[0] + 60 * (spot_attempt % 3) - 60),
-                        min(h - 10, spot[1] + 40 * ((spot_attempt // 3) % 2) - 20))
-            page.mouse.dblclick(spot[0], spot[1])
-            log(f"double-clicked start position at {spot}")
-            time.sleep(1.2)  # sample fast: the spawn aura (big, colored) is visible now
-            palette = calibrate(page, spot=spot)
-            if palette:
-                break
-            snapshot(page, "calib_fail")  # keep a frame so the user can see
+        # 3) choose start position (double-click land)
+        img = grab(page)
+        spot = land_spot(img)
+        page.mouse.dblclick(spot[0], spot[1])
+        log(f"double-clicked start position at {spot}")
+        time.sleep(2)
+
+        # 4) palette: we KNOW our color
+        palette = calibrate(page, know_color=SELF_RGB if ok_color else None)
         if palette is None:
-            log("CALIBRATION FAILED after all attempts.")
-            log("The game assigned you a color that blends with the map/leaderboard,")
-            log("which breaks pixel vision. FIX: in the Custom Scenario editor pick a")
-            log("VIVID color for yourself (e.g. bright red/orange/blue), then set")
-            log("MANUAL_COLOR = \"[r, g, b]\" at the top of run_bot.py (or the env var).")
+            log("calibration failed — saved frame")
             snapshot(page, "calib_fail")
             browser.close()
             sys.exit(1)
 
-        # ---- play ----
-        planner = ClickPlanner(ClickPlannerConfig(), TroopTracker(balance=512.0, land=12))
+        # 5) play with trained weights
+        planner = make_planner()
         controls = MouseControls(page)
         report = {"areas": []}
         action_counts: dict[str, int] = {}

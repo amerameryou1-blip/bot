@@ -212,7 +212,7 @@ class ClickPlanner:
         targets = state.expand_targets
         h, w = state.shape
         neutral = state.neutral_mask
-        radius = self.config.expand_radius
+        radius = int(self.config.expand_radius)
         # count neutral pixels in a square window around each target
         best_idx, best_score = 0, -1
         for i, (ty, tx) in enumerate(targets):
