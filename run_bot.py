@@ -144,12 +144,15 @@ def calibrate(page, spot=None) -> Palette | None:
             b = blob(img, color, tol=24, min_area=6)
             if b:
                 H, W = img.shape[:2]
+                frac = b["area"] / (H * W)
                 near_spot = abs(b["cx"] - spot[0]) < 120 and abs(b["cy"] - spot[1]) < 120
-                if (b["area"] / (H * W)) < 0.4 and edges_touched(b["mask"]) < 3 and near_spot:
+                # A starting territory + aura is small (<2% of frame). A huge
+                # blob means the sampled color is TERRAIN, not my territory.
+                if frac < 0.02 and edges_touched(b["mask"]) < 3 and near_spot:
                     log(f"CALIBRATED via spawn-spot: {color} (area={b['area']})")
                     return Palette(self_color=PlayerColor("me", *color), enemy_colors=[],
                                    tolerance=24.0, downscale=2)
-                log(f"spawn-spot color {color}: blob invalid (area={b['area']}, near_spot={near_spot})")
+                log(f"spawn-spot color {color}: blob invalid (area={b['area']}, frac={frac:.3f}, near_spot={near_spot})")
             else:
                 log(f"spawn-spot color {color}: no blob found")
     # FALLBACK: leaderboard swatch
