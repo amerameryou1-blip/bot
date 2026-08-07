@@ -36,7 +36,18 @@ Map
 
 **Training run:** Kaggle GPU notebook `amerameryou/bot-train-nn` (T4 GPU, Internet on)
 **Pipeline:** collect (CPU-parallel, medium bots) → vision (GPU) → clone (GPU) → PPO (GPU, curriculum medium→hard) → HF upload
-**Status (5 concurrent sessions):** all RUNNING — last checked 2026-08-07 ~15:45 UTC
+**Status (v7 relaunch, 5 concurrent sessions):** all RUNNING — last checked 2026-08-07 ~16:10 UTC
+
+**v7 fixes (from the v6 run that finished but didn't learn — alive was 0.00 the whole time):**
+- **Reward fix:** added a per-step survival bonus (+0.02) + bigger growth signal.
+  Before, the only signal was -1 on death → no positive gradient → never learned.
+- **Curriculum fix:** PPO now starts vs EASY bots and escalates by ALIVE RATE
+  (easy→medium at >35% survival, medium→hard at >60%). Before it started at
+  medium and the random policy died instantly every episode.
+- **Proved locally:** alive went 0.00 → **1.00** in round 1 (easy) with auto-upgrade.
+
+The v6 run DID prove the whole GPU pipeline works end-to-end (collect→vision→clone→
+100 PPO rounds→eval on GPU) — it just needed the reward/curriculum fix to actually learn.
 
 | Session | Role |
 |---|---|
