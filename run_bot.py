@@ -238,11 +238,18 @@ def main() -> None:
 
         # 2) Reset the scenario to defaults (persistent editor state can differ
         #    between machines/sessions and shift the layout) then Play.
+        # DEBUG: snapshot the editor screen so we can see what Kaggle shows
+        try:
+            page.screenshot(path=os.path.join(OUT, "debug_editor.png"))
+        except Exception:
+            pass
         reset = btn("Reset Scenario")
         if reset:
             page.mouse.click(reset["x"], reset["y"])
             log("reset scenario to defaults")
             time.sleep(3)
+        else:
+            log("no Reset Scenario button found")
         play = btn("Play")
         if not play:
             page.keyboard.press("Escape")
