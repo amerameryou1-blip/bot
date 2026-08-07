@@ -23,11 +23,12 @@ from PIL import Image
 
 # ---------------------------------------------------------------- CONFIG ---
 GAME_URL = "https://territorial.io/"
-BOT_NAME = "AureliaBot"
-PLAY_MINUTES = 4
-DECISION_HZ = 2.5            # click decisions per second
+BOT_NAME = os.environ.get("BOT_NAME", "AureliaBot")
+PLAY_MINUTES = float(os.environ.get("PLAY_MINUTES", "4"))
+DECISION_HZ = float(os.environ.get("DECISION_HZ", "2.5"))  # click decisions per second
 MAX_FRAMES_KEEP = 60
-MANUAL_COLOR = None          # e.g. [242, 216, 63] if you picked a color in the editor
+_MANUAL = os.environ.get("MANUAL_COLOR", "").strip()
+MANUAL_COLOR = json.loads(_MANUAL) if _MANUAL else None  # e.g. "[242, 216, 63]"
 
 # output dir: Kaggle working dir if present, else ./bot_output
 OUT = os.environ.get("KAGGLE_WORKING", "/kaggle/working") if os.path.isdir("/kaggle/working") else os.path.join(
