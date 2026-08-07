@@ -142,7 +142,7 @@ def discover_enemies(img, self_rgb, max_enemies=8):
         if len(coords):
             if coords[:, 0].mean() > 730 or (coords[:, 0].mean() < 340 and coords[:, 1].mean() < 500):
                 continue  # bottom UI / leaderboard
-        enemies.append(PlayerColor(f"e{len(enemies)}", *c))
+        enemies.append(PlayerColor(f"e{len(enemies)}", int(c[0]), int(c[1]), int(c[2])))
         if len(enemies) >= max_enemies:
             break
     return enemies
@@ -415,7 +415,9 @@ def main() -> None:
         start = time.time()
         last_shot = time.time()
         last_ocr = time.time()
-        last_enemy_colors: set = set()  # track COLORS, not labels (labels get reassigned)
+        last_enemy_colors: set = set()   # track COLORS (labels get reassigned)
+        seen_counts: dict = {}           # stability: colors seen steadily
+        miss_counts: dict = {}           # colors missing steadily -> eliminated
         eliminated = 0
         log(f"BOT PLAYING for {PLAY_MINUTES} min...")
         while time.time() - start < PLAY_MINUTES * 60:
@@ -449,13 +451,24 @@ def main() -> None:
                         img2 = grab(page)
                         en = discover_enemies(img2, tuple(palette.self_color.rgb))
                         now_colors = {tuple(e.rgb) for e in en}
-                        # a color present before and gone now = that enemy was
-                        # eliminated (territory gone / turned neutral)
-                        if last_enemy_colors:
-                            for c in last_enemy_colors - now_colors:
-                                eliminated += 1
-                                log(f">>> ENEMY ELIMINATED {c} (total {eliminated})")
-                                report["eliminations"].append({"t": round(time.time() - start, 1), "color": list(c)})
+                        # stability-based elimination: a color seen steadily
+                        # (>=2 checks) then missing steadily (>=2 checks) is a
+                        # real elimination — flicker/relabel is filtered out
+                        for c in now_colors:
+                            seen_counts[c] = seen_counts.get(c, 0) + 1
+                            miss_counts.pop(c, None)
+                        for c in list(seen_counts):
+                            if c not in now_colors:
+                                miss_counts[c] = miss_counts.get(c, 0) + 1
+                                if miss_counts[c] >= 2 and seen_counts[c] >= 2:
+                                    eliminated += 1
+                                    log(f">>> ENEMY ELIMINATED {list(c)} (total {eliminated})")
+                                    report["eliminations"].append({"t": round(time.time() - start, 1),
+                                                                   "color": [int(v) for v in c]})
+                                    del seen_counts[c]
+                                    del miss_counts[c]
+                            else:
+                                miss_counts[c] = 0
                         last_enemy_colors = now_colors
                         if en:
                             palette = Palette(self_color=palette.self_color, enemy_colors=en,
