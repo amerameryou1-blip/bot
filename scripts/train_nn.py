@@ -242,18 +242,21 @@ def _rollout_one(net, seed, skill, episodes=1):
                 actions[pid] = game._bot_clicks(pid)
             game.step(actions)
             area_after = int((game.world == 1).sum())
-            reward = (area_after - area_before) / 5000.0
-            if not game.players[1].alive:
+            reward = (area_after - area_before) / 2000.0  # growth signal
+            if game.players[1].alive:
+                reward += 0.02  # survival bonus every step -> positive gradient
+            else:
                 reward -= 1.0
                 done = True
             rw.append(reward)
-            if done:
+            if done or len(rw) >= 250:  # bound episode length (memory)
                 break
         if len(rw) < 3:
+            import gc; del ob_rgb, ob_ctx, k, c, p, lp, rw; gc.collect()
             continue
         alive_final = game.players[1].alive
         final_area = int((game.world == 1).sum())
-        rw[-1] += (1.0 if alive_final else 0.0) + min(final_area / 20000.0, 1.0) * 0.2
+        rw[-1] += (1.5 if alive_final else 0.0) + min(final_area / 20000.0, 1.0) * 0.3
         eps.append({
             "rgb": np.array(ob_rgb, dtype=np.float32) / 255.0,
             "ctx": np.array(ob_ctx, dtype=np.float32),
@@ -327,7 +330,7 @@ def stage_ppo(net, rounds=None, episodes_per_worker=1, workers=None, lr=1e-4, ev
     opt = torch.optim.Adam(net.parameters(), lr=lr)
     import multiprocessing as mp
     pool_eps = []
-    skill = "medium"
+    skill = "easy"  # curriculum: learn to SURVIVE first
     best_wr = 0.0
     for rnd in range(1, rounds + 1):
         net.eval()
@@ -360,13 +363,16 @@ def stage_ppo(net, rounds=None, episodes_per_worker=1, workers=None, lr=1e-4, ev
             print(f"  ppo round {rnd}: loss={loss:.3f} alive={alive_rate:.2f} "
                   f"eval_wr={wr:.2f} rank={rank:.2f} (collect {collect_t:.0f}s, train {train_t:.0f}s, "
                   f"pool={len(pool_eps)})", flush=True)
-            # curriculum: medium -> hard
-            if wr > 0.65 and skill == "medium":
-                skill = "hard"
-                print("  >>> curriculum: upgraded to HARD bots", flush=True)
-            elif wr < 0.3 and skill == "hard":
+            # curriculum: easy -> medium -> hard by ALIVE RATE
+            if skill == "easy" and alive_rate > 0.35:
                 skill = "medium"
-                print("  >>> curriculum: dropped back to MEDIUM bots", flush=True)
+                print("  >>> curriculum: EASY -> MEDIUM", flush=True)
+            elif skill == "medium" and alive_rate > 0.6:
+                skill = "hard"
+                print("  >>> curriculum: MEDIUM -> HARD", flush=True)
+            elif skill == "hard" and alive_rate < 0.3:
+                skill = "medium"
+                print("  >>> curriculum: HARD -> MEDIUM", flush=True)
         else:
             print(f"  ppo round {rnd}: loss={loss:.3f} alive={alive_rate:.2f} "
                   f"(collect {collect_t:.0f}s, train {train_t:.0f}s)", flush=True)
