@@ -163,18 +163,23 @@ def main() -> None:
 
         # ---- start position: double-click land, retry a few spots ----
         palette = None
-        for spot_attempt in range(5):
+        for spot_attempt in range(6):
             img = grab(page)
             spot = land_spot(img)
+            # vary the spot a bit each attempt in case the first was water/blocked
+            if spot_attempt > 0:
+                h, w = img.shape[:2]
+                spot = (min(w - 10, spot[0] + 60 * (spot_attempt % 3) - 60),
+                        min(h - 10, spot[1] + 40 * ((spot_attempt // 3) % 2) - 20))
             page.mouse.dblclick(spot[0], spot[1])
             log(f"double-clicked start position at {spot}")
-            time.sleep(4)
+            time.sleep(5)
             palette = calibrate(page)
             if palette:
                 break
+            snapshot(page, "calib_fail")  # keep a frame so the user can see
         if palette is None:
-            log("calibration failed after retries — saved frame for inspection")
-            snapshot(page, "calib_fail")
+            log("calibration failed after retries — frames saved as calib_fail_*")
             browser.close()
             sys.exit(1)
 

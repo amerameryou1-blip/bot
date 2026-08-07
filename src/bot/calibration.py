@@ -94,21 +94,25 @@ def swatch_from_strip(strip_rgb: np.ndarray, min_frac: float = 0.03) -> list[int
     return cands[0][2]
 
 
-def validate_territory_color(img: np.ndarray, color, tol: int = 48) -> bool:
-    """A real territory color forms a blob bigger than the swatch itself, not
-    touching 3+ edges, and not confined to the leaderboard corner."""
+def validate_territory_color(img: np.ndarray, color, tol: int = 48,
+                             min_area: int = 15, min_outside_lb: int = 8) -> bool:
+    """A real territory color forms a blob outside the leaderboard region.
+
+    Relaxed for the very start of a match: your territory begins at 12 pixels,
+    so a small blob is correct. The swatch itself lives inside the leaderboard
+    region (top-left), so we require the color to also appear OUTSIDE it.
+    """
     H, W = img.shape[:2]
-    b = blob(img, color, tol=tol, min_area=400)
+    b = blob(img, color, tol=tol, min_area=min_area)
     if b is None:
         return False
     frac = b["area"] / (H * W)
-    if not (0.00015 <= frac <= 0.4) or edges_touched(b["mask"]) >= 3:
+    if frac > 0.4 or edges_touched(b["mask"]) >= 3:
         return False
-    # Reject if the blob is just the leaderboard swatch (top-left corner).
     m = b["mask"]
     outside_lb = m.copy()
     outside_lb[:340, :480] = False
-    if outside_lb.sum() < 1500:
+    if outside_lb.sum() < min_outside_lb:
         return False
     return True
 
@@ -179,8 +183,8 @@ def calibrate_from_leaderboard(img: np.ndarray, bot_name: str, tol: int = 48):
     for c in saturated_colors(img, max_colors=34):
         if tuple(c) == tuple(swatch):
             continue
-        b = blob(img, c)
-        if b and 150 < b["area"] < 0.4 * H * W and edges_touched(b["mask"]) < 3:
+        b = blob(img, c, min_area=15)
+        if b and b["area"] < 0.4 * H * W and edges_touched(b["mask"]) < 3:
             enemies.append(PlayerColor(f"e{len(enemies)}", *c))
         if len(enemies) >= 10:
             break
