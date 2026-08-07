@@ -61,7 +61,7 @@ def main():
                                           "PPO_ROUNDS', '" + args.rounds + "'").split("\n")
     print("injected token into", injected, "cells")
 
-    script = notebook_to_script(nb)
+    script = "import subprocess, os, sys\n\n" + notebook_to_script(nb)
     with open(os.path.join(tmp, "kaggle_train_nn.py"), "w") as f:
         f.write(script)
     # sanity: compiles?
