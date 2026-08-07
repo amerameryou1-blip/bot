@@ -29,9 +29,13 @@ from pathlib import Path
 import numpy as np
 from PIL import Image
 
-JPEG_QUALITY = 82
+JPEG_QUALITY = 75
 DEFAULT_ROOT = Path("recordings")
 HF_REPO = "amer224/territorial-bot-data"
+# Frames are downscaled for storage: the NN consumes 64x64, so 256px-wide
+# JPEGs are plenty (each ~10-20KB vs ~60-150KB full-res). Click coordinates
+# are kept in ORIGINAL screen space; meta["frame_scale"] maps frame->screen.
+FRAME_WIDTH = int(os.environ.get("REC_FRAME_WIDTH", "256"))
 
 
 class GameRecorder:
@@ -64,14 +68,23 @@ class GameRecorder:
     # -- frames -------------------------------------------------------------
 
     def record_frame(self, frame: np.ndarray, t: float | None = None) -> int:
-        """Save one frame, return its index."""
+        """Save one frame (downscaled), return its index."""
         if self._closed:
             return self._frame_idx - 1
         idx = self._frame_idx
         self._frame_idx += 1
         try:
             im = Image.fromarray(frame[..., :3].astype(np.uint8))
+            orig_w, orig_h = im.size
+            if orig_w > FRAME_WIDTH:
+                h = max(1, round(orig_h * FRAME_WIDTH / orig_w))
+                im = im.resize((FRAME_WIDTH, h), Image.LANCZOS)
             im.save(self.frames_dir / f"{idx:06d}.jpg", quality=JPEG_QUALITY)
+            if idx == 0:
+                self._meta["frame_orig_size"] = [orig_w, orig_h]
+                self._meta["frame_size"] = list(im.size)
+                self._meta["frame_scale"] = orig_w / float(im.size[0])
+                self._write_meta()
             # occasionally flush click log so a crash never loses data
             if idx % 50 == 0:
                 self._flush_clicks()

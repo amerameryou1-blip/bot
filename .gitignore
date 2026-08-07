@@ -4,3 +4,4 @@ __pycache__/
 bot_output/
 weights/nn/
 recordings/
+probe_out/

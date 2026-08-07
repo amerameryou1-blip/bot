@@ -329,79 +329,56 @@ def main(record: bool = False, upload: bool = False,
             pass
         time.sleep(1)
 
-        def btn(text):
-            els = page.evaluate("""() => Array.from(document.querySelectorAll('button')).map((el) => {
-                const r = el.getBoundingClientRect();
-                return {text: (el.innerText || '').trim(), x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)};
-            })""")
-            return next((e for e in els if text in e["text"]), None)
+        from bot.ui import enter_custom_match
 
-        # 1) open the Custom Scenario editor. IMPORTANT: the main menu has a
-        #    'Google Play' badge — naive text search for 'Play' would hit that.
-        cs = btn("Custom Scenario")
-        if cs:
-            page.mouse.click(cs["x"], cs["y"])
-            log(f"clicked Custom Scenario ({cs['x']},{cs['y']})")
-        else:
-            page.mouse.click(714, 411)
-            log("clicked Custom Scenario (coords fallback)")
-        time.sleep(3.5)
-
-        # 2) reset the scenario to defaults (persistent editor state can differ
-        #    between machines/sessions and shift the layout) then Play.
-        reset = btn("Reset Scenario")
-        if reset:
-            page.mouse.click(reset["x"], reset["y"])
-            log("reset scenario to defaults")
-            time.sleep(3)
-        else:
-            log("no Reset Scenario button found")
-
-        # verify we're really in the editor (it has a Back button); if not,
-        # re-open Custom Scenario
-        if not btn("Back") and not btn("Reset Scenario"):
-            log("not in editor — reopening Custom Scenario")
-            cs = btn("Custom Scenario")
-            if cs:
-                page.mouse.click(cs["x"], cs["y"])
-            else:
-                page.mouse.click(714, 411)
-            time.sleep(3.5)
-
-        def play_btn():
-            els = page.evaluate("""() => Array.from(document.querySelectorAll('button')).map((el) => {
-                const r = el.getBoundingClientRect();
-                return {text: (el.innerText || '').trim(), x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)};
-            })""")
-            # STRICT: strip emojis then exact-match 'Play'. '⚔️ Multiplayer'
-            # would otherwise match a loose 'starts with ⚔️' check.
-            for e in els:
-                t = e["text"].replace("⚔️", "").replace("🗡️", "").strip()
-                if t == "Play":
-                    return e
-            return None
-
-        play = play_btn()
-        if not play:
-            page.keyboard.press("Escape")
-            time.sleep(1.5)
-            play = play_btn()
-        if play:
-            page.mouse.click(play["x"], play["y"])
-            log(f"clicked Play ({play['x']},{play['y']})")
-        else:
-            log("NO Play button — aborting")
+        # 1) open the Custom Scenario editor, reset, strict-Play, and verify
+        #    we are NOT in the multiplayer lobby (retries internally).
+        if not enter_custom_match(page, log=log):
+            log("FATAL: could not enter a custom scenario match")
+            snapshot(page, "nav_fail")
             browser.close()
             sys.exit(1)
-        time.sleep(4)
 
         # 3) detect own color via the spawn spot (autonomous, no OCR)
         palette = detect_own_color(page)
+        if palette is None:
+            log("no spawn blob — falling back to leaderboard swatch calibration")
+            try:
+                from bot.calibration import calibrate_from_leaderboard
+                palette, reason = calibrate_from_leaderboard(grab(page), BOT_NAME)
+                if palette is None:
+                    log(f"leaderboard calibration failed: {reason}")
+                    snapshot(page, "calib_fail")
+                    browser.close()
+                    sys.exit(1)
+                log(f"calibrated via leaderboard: {reason}")
+            except Exception as e:
+                log(f"leaderboard calibration error: {e}")
+                snapshot(page, "calib_fail")
+                browser.close()
+                sys.exit(1)
         if palette is None:
             log("no spawn detected after retries — saved frame")
             snapshot(page, "calib_fail")
             browser.close()
             sys.exit(1)
+
+        # 3.5) CAMERA FIX (the #1 blocker): the game spawns zoomed into our
+        # territory. Zoom out via the game's own wheel path (synthetic
+        # WheelEvent on canvasA) and verify numerically that our blob is
+        # 1-6% of the screen with >=2 enemy colors visible.
+        from bot.camera import fix_camera
+        cam = fix_camera(page, lambda: grab(page), palette.self_color.rgb,
+                         bot_name=BOT_NAME, log=log)
+        if not cam.get("pass"):
+            log("[camera] WARNING: view not ideal — recording diagnostic frame")
+            snapshot(page, "cam_fail")
+        else:
+            log(f"[camera] view OK — self={cam['self_frac']}% of screen, "
+                f"{cam['enemies_visible']} enemy colors visible")
+            snapshot(page, "cam_ok")
+        cam_ok = bool(cam.get("pass"))
+
         # discover enemy colors so segment() finds attack targets
         img = grab(page)
         enemy_colors = discover_enemies(img, tuple(palette.self_color.rgb))
@@ -433,7 +410,11 @@ def main(record: bool = False, upload: bool = False,
                     bot_name=BOT_NAME, map=info.get("name"), map_dim=f"{info.get('w')}x{info.get('h')}" if "w" in info else None,
                     self_color=[int(v) for v in palette.self_color.rgb],
                     enemy_colors=[[int(v) for v in e.rgb] for e in enemy_colors],
-                    play_minutes=play_minutes)
+                    play_minutes=play_minutes,
+                    zoom_level=os.environ.get("ZOOM_LEVEL", "auto"),
+                    camera_pass=cam_ok,
+                    camera_self_pct=cam.get("self_frac"),
+                    camera_enemies=cam.get("enemies_visible"))
             except Exception as e:
                 log(f"  map-info OCR err: {e}")
 

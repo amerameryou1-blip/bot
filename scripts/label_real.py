@@ -121,8 +121,10 @@ def process_recordings(rec_root: Path) -> dict:
             rgb_list.append(rgb_s); lab_list.append(lab_s)
             if idx in clicks:
                 c = clicks[idx]
-                cy = int(c["y"] / labels.shape[0] * GRID)
-                cx = int(c["x"] / labels.shape[1] * GRID)
+                # clicks are in ORIGINAL screen space; frames may be downscaled
+                o_w, o_h = meta.get("frame_orig_size", [labels.shape[1], labels.shape[0]])
+                cy = int(c["y"] / o_h * GRID)
+                cx = int(c["x"] / o_w * GRID)
                 cy = min(GRID - 1, max(0, cy)); cx = min(GRID - 1, max(0, cx))
                 kind_map = {"expand": 0, "attack": 1, "bank": 2}
                 kind_list.append(kind_map.get(c["kind"], 0))
