@@ -279,7 +279,7 @@ def _train_ppo_batch(net, opt, episodes, epochs=4, gamma=0.99, lam=0.95, clip=0.
         T = len(ep["reward"])
         # GAE
         with torch.no_grad():
-            xb = torch.tensor(ep["rgb"], device=DEVICE)
+            xb = torch.tensor(ep["rgb"], dtype=torch.float32, device=DEVICE) / 255.0
             cxb = torch.tensor(ep["ctx"], device=DEVICE)
             _, _, _, vals = net.forward(xb, cxb)
             vals = vals.cpu().numpy()
@@ -292,7 +292,7 @@ def _train_ppo_batch(net, opt, episodes, epochs=4, gamma=0.99, lam=0.95, clip=0.
         adv = (adv - adv.mean()) / (adv.std() + 1e-8)
         ret = np.array([ep["reward"][t] + (vals[t + 1] if t + 1 < T else (1.0 if ep["alive"] else 0.0)) * gamma
                         for t in range(T)], dtype=np.float32)
-        xb = torch.tensor(ep["rgb"], device=DEVICE)
+        xb = torch.tensor(ep["rgb"], dtype=torch.float32, device=DEVICE) / 255.0
         cxb = torch.tensor(ep["ctx"], device=DEVICE)
         kb = torch.tensor(ep["kind"], device=DEVICE)
         cb = torch.tensor(ep["cell"], device=DEVICE)
@@ -305,9 +305,10 @@ def _train_ppo_batch(net, opt, episodes, epochs=4, gamma=0.99, lam=0.95, clip=0.
             logpk = F.log_softmax(kind, dim=1)
             logpc = F.log_softmax(click, dim=1)
             lp = logpk.gather(1, kb.unsqueeze(1)).squeeze(1)
-            nb_mask = kb != 2
-            if nb_mask.any():
-                lp = lp + logpc.gather(1, cb[nb_mask].unsqueeze(1)).squeeze(1) * nb_mask.float()
+            nb_mask = (kb != 2).float()
+            # cell log-prob for ALL steps; zeroed out for bank actions
+            cell_lp = logpc.gather(1, cb.unsqueeze(1)).squeeze(1)
+            lp = lp + cell_lp * nb_mask
             ratio = torch.exp(lp - old_lp)
             pg = -torch.min(ratio * adv_t, torch.clamp(ratio, 1 - clip, 1 + clip) * adv_t).mean()
             vf = F.mse_loss(value, ret_t)
@@ -318,8 +319,8 @@ def _train_ppo_batch(net, opt, episodes, epochs=4, gamma=0.99, lam=0.95, clip=0.
     return tot_loss / max(nb, 1)
 
 
-def stage_ppo(net, rounds=None, episodes_per_worker=2, workers=None, lr=1e-4, eval_every=5,
-              pool_cap=8000):
+def stage_ppo(net, rounds=None, episodes_per_worker=1, workers=None, lr=1e-4, eval_every=5,
+              pool_cap=80):
     rounds = rounds or int(os.environ.get("PPO_ROUNDS", "40"))
     ncores = os.cpu_count() or 2
     workers = workers or int(os.environ.get("WORKERS", str(ncores - 1 if ncores > 1 else 1)))
@@ -332,14 +333,21 @@ def stage_ppo(net, rounds=None, episodes_per_worker=2, workers=None, lr=1e-4, ev
         net.eval()
         state_dict = {k: v.cpu() for k, v in net.state_dict().items()}
         t0 = time.time()
-        with mp.Pool(workers, initializer=_init_worker, initargs=(state_dict,)) as pool:
-            tasks = [(1000 + rnd * 10 + w, skill, episodes_per_worker) for w in range(workers)]
-            for res in pool.imap_unordered(_rollout_worker, tasks):
-                pool_eps.extend(res)
+        if workers <= 1:
+            # inline (no pool) — used on low-RAM boxes and as a fallback
+            for w in range(episodes_per_worker):
+                pool_eps.extend(_rollout_one(net, 1000 + rnd * 10 + w, skill, 1))
+        else:
+            with mp.Pool(workers, initializer=_init_worker, initargs=(state_dict,)) as pool:
+                tasks = [(1000 + rnd * 10 + w, skill, episodes_per_worker) for w in range(workers)]
+                for res in pool.imap_unordered(_rollout_worker, tasks):
+                    pool_eps.extend(res)
         collect_t = time.time() - t0
         # cap pool (drop oldest)
         if len(pool_eps) > pool_cap:
             pool_eps = pool_eps[-pool_cap:]
+        import gc
+        gc.collect()
         t0 = time.time()
         loss = _train_ppo_batch(net, opt, pool_eps)
         train_t = time.time() - t0
