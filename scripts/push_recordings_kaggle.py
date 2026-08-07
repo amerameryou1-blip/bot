@@ -98,11 +98,18 @@ zips = glob.glob(os.path.join(INPUT, "**", "*.zip"), recursive=True)
 print("zips:", zips)
 if not zips:
     print("FAIL: no zip in input"); sys.exit(1)
-dest = "/kaggle/working/recordings"
-os.makedirs(dest, exist_ok=True)
-with zipfile.ZipFile(zips[0]) as z:
-    z.extractall(dest)
-sessions = sorted(glob.glob(os.path.join(dest, "*/meta.json")))
+# Kaggle auto-extracts dataset zips; handle both extracted dirs and zips
+import glob as _g
+cands = _g.glob(os.path.join(INPUT, "*/meta.json"))
+if not cands:
+    cands = _g.glob(os.path.join(INPUT, "**", "*.zip"), recursive=True)
+    if cands:
+        dest = "/kaggle/working/recordings"
+        os.makedirs(dest, exist_ok=True)
+        with zipfile.ZipFile(cands[0]) as z:
+            z.extractall(dest)
+        cands = _g.glob(os.path.join(dest, "*/meta.json"))
+sessions = sorted(cands)
 print("sessions:", len(sessions))
 ok = 0
 for meta_path in sessions:

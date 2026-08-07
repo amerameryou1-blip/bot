@@ -1,13 +1,34 @@
 #!/usr/bin/env python3
-"""Inject HF token into a TEMP copy of the GPU notebook, push to Kaggle, monitor.
+"""Inject HF token into a TEMP copy of the GPU trainer, push as a SCRIPT kernel
+(notebook kernels pushed via API do NOT auto-execute; script kernels do),
+monitor, and dump the log.
 
 The repo copy is token-free (public repo). This script only touches /tmp.
 Usage: HF_TOKEN=... python3 scripts/launch_train.py [--rounds 100]
 """
-import argparse, json, os, shutil, subprocess, sys, tempfile, time
+import argparse, json, os, subprocess, sys, tempfile, time
+
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 NB = os.path.join(ROOT, "kaggle-push", "kaggle_train_nn.ipynb")
+
+
+def notebook_to_script(nb: dict) -> str:
+    """Concatenate code cells; convert Jupyter shell magic (!cmd) to subprocess."""
+    parts = []
+    for c in nb["cells"]:
+        if c["cell_type"] != "code":
+            continue
+        src = "".join(c["source"])
+        lines = []
+        for line in src.split("\n"):
+            if line.startswith("!"):
+                cmd = line[1:].strip()
+                lines.append(f"subprocess.run({cmd!r}, shell=True, check=False)")
+            else:
+                lines.append(line)
+        parts.append("\n".join(lines))
+    return "\n\n\n# ===== next cell =====\n\n\n".join(parts)
 
 
 def main():
@@ -22,7 +43,6 @@ def main():
 
     tmp = tempfile.mkdtemp(prefix="train_launch_")
     nb = json.load(open(NB))
-    # inject token into the env-fallback slots
     injected = 0
     for c in nb["cells"]:
         if c["cell_type"] != "code":
@@ -41,13 +61,19 @@ def main():
                                           "PPO_ROUNDS', '" + args.rounds + "'").split("\n")
     print("injected token into", injected, "cells")
 
-    # metadata: script kernel
+    script = notebook_to_script(nb)
+    with open(os.path.join(tmp, "kaggle_train_nn.py"), "w") as f:
+        f.write(script)
+    # sanity: compiles?
+    compile(script, "<kernel>", "exec")
+    print("script compiles OK,", len(script.splitlines()), "lines")
+
     meta = {
         "id": "amerameryou/bot-train-nn",
         "title": "bot-train-nn",
-        "code_file": "kaggle_train_nn.ipynb",
+        "code_file": "kaggle_train_nn.py",
         "language": "python",
-        "kernel_type": "notebook",
+        "kernel_type": "script",
         "is_private": True,
         "enable_gpu": True,
         "enable_internet": True,
@@ -56,16 +82,14 @@ def main():
     }
     with open(os.path.join(tmp, "kernel-metadata.json"), "w") as f:
         json.dump(meta, f, indent=1)
-    with open(os.path.join(tmp, "kaggle_train_nn.ipynb"), "w") as f:
-        json.dump(nb, f)
 
     r = subprocess.run(["kaggle", "kernels", "push", "-p", tmp], capture_output=True, text=True)
     print(r.stdout.strip()[-400:])
     print(r.stderr.strip()[-400:] if r.returncode else "")
     if r.returncode != 0:
         sys.exit(1)
-    print("PUSHED. Monitoring amerameryou/bot-train-nn...")
-    for i in range(120):
+    print("PUSHED (script kernel). Monitoring amerameryou/bot-train-nn...")
+    for i in range(180):
         s = subprocess.run(["kaggle", "kernels", "status", "amerameryou/bot-train-nn"],
                            capture_output=True, text=True).stdout
         st = "running"
@@ -73,7 +97,7 @@ def main():
         elif "ERROR" in s: st = "ERROR"
         elif "QUEUED" in s: st = "QUEUED"
         elif "CANCEL" in s: st = "CANCELLED"
-        print(f"[{i}] {st}")
+        print(f"[{i}] {st}", flush=True)
         if st in ("COMPLETE", "ERROR", "CANCELLED"):
             out = os.path.join(tmp, "out")
             os.makedirs(out, exist_ok=True)
@@ -81,13 +105,13 @@ def main():
                            capture_output=True)
             logf = os.path.join(out, "bot-train-nn.log")
             if os.path.exists(logf):
-                print("===== TRAIN LOG TAIL =====")
+                print("===== TRAIN LOG =====")
                 try:
                     for d in json.load(open(logf)):
                         if d["stream_name"] == "stdout":
                             print(d["data"], end="")
                 except Exception:
-                    print(open(logf).read()[-4000:])
+                    print(open(logf).read()[-6000:])
             sys.exit(0 if st == "COMPLETE" else 1)
         time.sleep(60)
 
