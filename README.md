@@ -91,5 +91,25 @@ How to watch it yourself:
    Hugging Face `amer224/territorial-bot-nn` (if HF_TOKEN secret is set)
 3. The live bot (`run_bot.py`) auto-loads the HF model and plays with the NN brain
 
-Curriculum logic: PPO starts vs MEDIUM bots; when eval win-rate > 65% it
-upgrades to HARD; if < 30% it drops back. This is the easy→medium→hard plan.
+Curriculum logic (v7): PPO starts vs EASY bots and escalates by how well it
+survives — easy→medium when alive-rate > 0.35, medium→hard when > 0.6,
+drop back a level if < 0.3. Plus a per-step survival bonus (+0.02) and win
+bonus (+1.5) so the network learns to LIVE first, expand second. (v6 ran the
+whole 100 rounds with alive 0.00 — the medium-only, no-survival-bonus reward
+never taught it anything. v7's easy-start + survival reward is the fix.)
+
+## Real-game screenshots (map data)
+
+26 real screenshots uploaded by the user, now organized on HF in
+`amer224/territorial-bot-data` under `screenshots/<map>/` (was: 26 loose
+files at repo root). All are the "Choose your start position!" phase = full
+map visible + on-screen stats. `screenshots/index.json` maps every file to
+map name, real dimension, and OCR'd land/water/mountain %.
+
+Coverage (23 distinct maps): island, white_arena, black_arena, mountains(2),
+desert, swamp, white_plains(2), cliffs, pond, halo, island_kingdom, europe,
+world(2), caucasia, africa, middle_east, scandinavia, north_america,
+south_america, asia, australia, british_isles, mare_nostrum.
+
+Use: rebuild sim maps at REAL dimensions/coastlines (per-map land% from OCR
+is the validation target), and as the seed for real-frame vision fine-tuning.
