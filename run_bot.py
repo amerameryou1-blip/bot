@@ -254,13 +254,29 @@ def main() -> None:
         else:
             log("no Reset Scenario button found")
 
+        # verify we're really in the editor (it has a Back button); if not,
+        # re-open Custom Scenario
+        if not btn("Back") and not btn("Reset Scenario"):
+            log("not in editor — reopening Custom Scenario")
+            cs = btn("Custom Scenario")
+            if cs:
+                page.mouse.click(cs["x"], cs["y"])
+            else:
+                page.mouse.click(714, 411)
+            time.sleep(3.5)
+
         def play_btn():
             els = page.evaluate("""() => Array.from(document.querySelectorAll('button')).map((el) => {
                 const r = el.getBoundingClientRect();
                 return {text: (el.innerText || '').trim(), x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)};
             })""")
-            # the editor Play is '⚔️ Play' — never the 'Google Play' menu badge
-            return next((e for e in els if e["text"].strip() == "Play" or e["text"].startswith("⚔️")), None)
+            # STRICT: strip emojis then exact-match 'Play'. '⚔️ Multiplayer'
+            # would otherwise match a loose 'starts with ⚔️' check.
+            for e in els:
+                t = e["text"].replace("⚔️", "").replace("🗡️", "").strip()
+                if t == "Play":
+                    return e
+            return None
 
         play = play_btn()
         if not play:
