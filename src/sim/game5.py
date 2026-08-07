@@ -35,21 +35,17 @@ class ClickPlayer:
 
 class ClickSim5:
     def __init__(self, h: int = 130, w: int = 170, n_bots: int = 3, seed: int = 1,
-                 max_ticks: int = 1800, clicks_per_tick: int = 12, bot_skill: str = "medium"):
+                 max_ticks: int = 1800, clicks_per_tick: int = 12, bot_skill: str = "medium",
+                 map_type: str = "lakes"):
         self.h, self.w = h, w
         self.bot_skill = bot_skill
+        self.map_type = map_type
         self.rng = np.random.default_rng(seed)
         self.tick = 0
         self.max_ticks = max_ticks
         self.clicks_per_tick = clicks_per_tick
 
-        self.world = np.zeros((h, w), dtype=np.int16)
-        for _ in range(10):
-            cy = int(self.rng.integers(0, h))
-            cx = int(self.rng.integers(0, w))
-            r = int(self.rng.integers(5, 14))
-            yy, xx = np.ogrid[:h, :w]
-            self.world[(yy - cy) ** 2 + (xx - cx) ** 2 < r ** 2] = -1
+        self.world = self._make_map(map_type)
 
         self.players: dict[int, ClickPlayer] = {1: ClickPlayer("OURS", 1, seed)}
         for i in range(n_bots):
@@ -69,6 +65,39 @@ class ClickSim5:
         self.enemy_colors = {pid: (60, 140, 240) if pid % 3 == 0 else
                              (60, 200, 120) if pid % 3 == 1 else (240, 160, 60)
                              for pid in self._pids}
+
+    def _make_map(self, map_type):
+        """Generate varied map layouts: lakes / island / mountains / desert / swamp."""
+        h, w = self.h, self.w
+        world = np.zeros((h, w), dtype=np.int16)
+        if map_type == "island":
+            for _ in range(6):
+                cy, cx, r = int(self.rng.integers(0, h)), int(self.rng.integers(0, w)), int(self.rng.integers(8, 22))
+                yy, xx = np.ogrid[:h, :w]
+                world[(yy - cy) ** 2 + (xx - cx) ** 2 < r ** 2] = -1
+        elif map_type == "mountains":
+            for _ in range(4):
+                cy, cx, r = int(self.rng.integers(0, h)), int(self.rng.integers(0, w)), int(self.rng.integers(6, 14))
+                yy, xx = np.ogrid[:h, :w]
+                world[(yy - cy) ** 2 + (xx - cx) ** 2 < r ** 2] = -1
+            for i in range(0, min(h, w), 5):
+                world[max(0, i - 1):i + 2, i:i + 2] = -1
+        elif map_type == "desert":
+            for _ in range(3):
+                cy, cx, r = int(self.rng.integers(0, h)), int(self.rng.integers(0, w)), int(self.rng.integers(5, 10))
+                yy, xx = np.ogrid[:h, :w]
+                world[(yy - cy) ** 2 + (xx - cx) ** 2 < r ** 2] = -1
+        elif map_type == "swamp":
+            for _ in range(18):
+                cy, cx, r = int(self.rng.integers(0, h)), int(self.rng.integers(0, w)), int(self.rng.integers(2, 7))
+                yy, xx = np.ogrid[:h, :w]
+                world[(yy - cy) ** 2 + (xx - cx) ** 2 < r ** 2] = -1
+        else:  # lakes
+            for _ in range(10):
+                cy, cx, r = int(self.rng.integers(0, h)), int(self.rng.integers(0, w)), int(self.rng.integers(5, 14))
+                yy, xx = np.ogrid[:h, :w]
+                world[(yy - cy) ** 2 + (xx - cx) ** 2 < r ** 2] = -1
+        return world
 
     # -- observation -------------------------------------------------------
 

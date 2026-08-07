@@ -42,13 +42,14 @@ def _random_action(st, rng, game):
     return ClickAction("bank", reason="rand-bank")
 
 
-def collect_seed(sd, n_bots, h, w, max_ticks, clicks_per_tick, eps, bot_skill, rng_seed, record_every):
+def collect_seed(sd, n_bots, h, w, max_ticks, clicks_per_tick, eps, bot_skill, rng_seed, record_every,
+                map_type="lakes"):
     """Play `n_matches` matches for one seed; return sample arrays."""
     rng = np.random.default_rng(rng_seed)
     rgb_l, seg_l, cent_l, kind_l, cell_l, pct_l = [], [], [], [], [], []
     planner = ClickPlanner(ClickPlannerConfig(), TroopTracker(balance=512.0, land=12))
     game = ClickSim5(h=h, w=w, n_bots=n_bots, seed=sd, max_ticks=max_ticks,
-                     clicks_per_tick=clicks_per_tick, bot_skill=bot_skill)
+                     clicks_per_tick=clicks_per_tick, bot_skill=bot_skill, map_type=map_type)
     while game.tick < game.max_ticks:
         actions = {}
         if game.players[1].alive:
@@ -91,10 +92,11 @@ def _worker(args):
 
 
 def collect_parallel(seeds=24, n_bots=3, h=110, w=140, max_ticks=1400, clicks_per_tick=12,
-                     eps=0.15, bot_skill="medium", record_every=RECORD_EVERY, workers=4):
+                     eps=0.15, bot_skill="medium", record_every=RECORD_EVERY, workers=4,
+                     map_type="lakes"):
     """Collect from many seeds in parallel; combine into one array dict."""
     import multiprocessing as mp
-    tasks = [(sd, n_bots, h, w, max_ticks, clicks_per_tick, eps, bot_skill, sd * 7 + 1, record_every)
+    tasks = [(sd, n_bots, h, w, max_ticks, clicks_per_tick, eps, bot_skill, sd * 7 + 1, record_every, map_type)
              for sd in range(1, seeds + 1)]
     results = []
     with mp.Pool(workers) as pool:
