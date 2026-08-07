@@ -233,16 +233,19 @@ def main() -> None:
             })""")
             return next((e for e in els if text in e["text"]), None)
 
-        # 1) no editor color changes — they shift scenario settings and break
-        #    the spawn phase. Detection is causal (spawn spot), no color set.
+        # 1) open the Custom Scenario editor. IMPORTANT: the main menu has a
+        #    'Google Play' badge — naive text search for 'Play' would hit that.
+        cs = btn("Custom Scenario")
+        if cs:
+            page.mouse.click(cs["x"], cs["y"])
+            log(f"clicked Custom Scenario ({cs['x']},{cs['y']})")
+        else:
+            page.mouse.click(714, 411)
+            log("clicked Custom Scenario (coords fallback)")
+        time.sleep(3.5)
 
-        # 2) Reset the scenario to defaults (persistent editor state can differ
+        # 2) reset the scenario to defaults (persistent editor state can differ
         #    between machines/sessions and shift the layout) then Play.
-        # DEBUG: snapshot the editor screen so we can see what Kaggle shows
-        try:
-            page.screenshot(path=os.path.join(OUT, "debug_editor.png"))
-        except Exception:
-            pass
         reset = btn("Reset Scenario")
         if reset:
             page.mouse.click(reset["x"], reset["y"])
@@ -250,11 +253,20 @@ def main() -> None:
             time.sleep(3)
         else:
             log("no Reset Scenario button found")
-        play = btn("Play")
+
+        def play_btn():
+            els = page.evaluate("""() => Array.from(document.querySelectorAll('button')).map((el) => {
+                const r = el.getBoundingClientRect();
+                return {text: (el.innerText || '').trim(), x: Math.round(r.x + r.width/2), y: Math.round(r.y + r.height/2)};
+            })""")
+            # the editor Play is '⚔️ Play' — never the 'Google Play' menu badge
+            return next((e for e in els if e["text"].strip() == "Play" or e["text"].startswith("⚔️")), None)
+
+        play = play_btn()
         if not play:
             page.keyboard.press("Escape")
             time.sleep(1.5)
-            play = btn("Play")
+            play = play_btn()
         if play:
             page.mouse.click(play["x"], play["y"])
             log(f"clicked Play ({play['x']},{play['y']})")
