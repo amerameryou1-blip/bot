@@ -42,7 +42,26 @@ CFG_JSON = WEIGHTS / "config.json"
 
 GRID = 16
 CTX_DIM = 3
-DEVICE = torch.device("cpu" if os.environ.get("FORCE_CPU") == "1" else ("cuda" if torch.cuda.is_available() else "cpu"))
+
+
+def _safe_device():
+    """Pick cuda ONLY if it actually executes ops (P100 sm_60 is not supported
+    by modern torch builds — torch.cuda.is_available() lies about that)."""
+    if os.environ.get("FORCE_CPU") == "1":
+        return torch.device("cpu")
+    if not torch.cuda.is_available():
+        return torch.device("cpu")
+    try:
+        a = torch.randn(16, 16, device="cuda")
+        (a @ a).sum().item()
+        torch.cuda.synchronize()
+        return torch.device("cuda")
+    except Exception as e:
+        print(f"CUDA unusable ({str(e)[:90]}) — using CPU", flush=True)
+        return torch.device("cpu")
+
+
+DEVICE = _safe_device()
 print(f"device: {DEVICE}", flush=True)
 
 SEED = 2026
@@ -166,8 +185,9 @@ def _init_worker(state_dict):
 
 
 def _policy_action(net, st, game):
+    dev = next(net.parameters()).device
     rgb, _ = game.frame_tensor(1, size=64)
-    x = torch.tensor(rgb.transpose(2, 0, 1)[None], dtype=torch.float32)
+    x = torch.tensor(rgb.transpose(2, 0, 1)[None], dtype=torch.float32, device=dev)
     with torch.no_grad():
         click, kind, pct, _ = net.forward(x, None)
         probs_k = F.softmax(kind[0], dim=-1)
@@ -200,8 +220,9 @@ def _rollout_one(net, seed, skill, episodes=1):
             if not st.self_blob:
                 break
             act, pctv = _policy_action(net, st, game)
+            dev = next(net.parameters()).device
             rgb, _ = game.frame_tensor(1, size=64)
-            x = torch.tensor(rgb.transpose(2, 0, 1)[None], dtype=torch.float32)
+            x = torch.tensor(rgb.transpose(2, 0, 1)[None], dtype=torch.float32, device=dev)
             with torch.no_grad():
                 click, kind, pct, _ = net.forward(x, None)
                 probs_k = F.softmax(kind[0], dim=-1)
@@ -300,7 +321,8 @@ def _train_ppo_batch(net, opt, episodes, epochs=4, gamma=0.99, lam=0.95, clip=0.
 def stage_ppo(net, rounds=None, episodes_per_worker=2, workers=None, lr=1e-4, eval_every=5,
               pool_cap=8000):
     rounds = rounds or int(os.environ.get("PPO_ROUNDS", "40"))
-    workers = workers or int(os.environ.get("WORKERS", "2"))
+    ncores = os.cpu_count() or 2
+    workers = workers or int(os.environ.get("WORKERS", str(ncores - 1 if ncores > 1 else 1)))
     opt = torch.optim.Adam(net.parameters(), lr=lr)
     import multiprocessing as mp
     pool_eps = []
@@ -347,6 +369,7 @@ def stage_ppo(net, rounds=None, episodes_per_worker=2, workers=None, lr=1e-4, ev
 # ================================================================ eval =======
 def evaluate(net, seeds=6, silent=False):
     from sim.game5 import ClickSim5
+    net.eval()
     wins = 0
     ranks = []
     for seed in range(1, seeds + 1):
@@ -384,6 +407,10 @@ def main():
     net = make_net().to(DEVICE)
     if MODEL_PT.exists():
         load_model(net)
+    if stage == "eval":
+        wr, rank = evaluate(net, seeds=6)
+        print(f"EVAL(wr={wr:.2f}, rank={rank:.2f}) model={MODEL_PT}", flush=True)
+        return
     if stage in ("collect", "all"):
         stage_collect()
     if stage in ("vision", "all"):
