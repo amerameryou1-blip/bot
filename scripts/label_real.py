@@ -184,11 +184,15 @@ def main() -> int:
 
     out = Path(args.out)
     out.parent.mkdir(parents=True, exist_ok=True)
+    # store rgb as uint8 (0..255) and labels as uint8 — ~6x smaller npz;
+    # train_nn.py converts back to float on load.
     np.savez_compressed(out,
-                        rgb=data["rgb"], labels=data["labels"],
+                        rgb=(data["rgb"] * 255.0).astype(np.uint8),
+                        labels=data["labels"].astype(np.uint8),
                         kind=data["kind"] if data["kind"] is not None else np.zeros(0, dtype=np.int64),
                         cell=data["cell"] if data["cell"] is not None else np.zeros(0, dtype=np.int64),
-                        pct=data["pct"] if data["pct"] is not None else np.zeros(0, dtype=np.float32))
+                        pct=data["pct"] if data["pct"] is not None else np.zeros(0, dtype=np.float32),
+                        dtype_comment="rgb uint8 0..255, labels uint8; convert /255 on load")
     n = len(data["rgb"])
     clicks = len(data["kind"]) if data["kind"] is not None else 0
     print(f"saved {out}: {n} frames, {clicks} click labels")

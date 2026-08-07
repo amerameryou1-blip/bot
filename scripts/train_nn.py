@@ -379,7 +379,10 @@ def stage_real(net, epochs=10, bs=128, lr=3e-4):
         print(f"[real] no {REAL_NPZ} — skipping (run scripts/label_real.py first)", flush=True)
         return net
     d = np.load(REAL_NPZ)
-    n = len(d["rgb"])
+    rgb_all = d["rgb"]
+    if rgb_all.dtype != np.float32:
+        rgb_all = rgb_all.astype(np.float32) / 255.0  # uint8 -> 0..1
+    n = len(rgb_all)
     idx = np.random.RandomState(0).permutation(n)
     n_val = max(1, n // 10)
     val_i, tr_i = idx[:n_val], idx[n_val:]
@@ -393,7 +396,7 @@ def stage_real(net, epochs=10, bs=128, lr=3e-4):
         with torch.no_grad():
             for i in range(0, len(subset), bs):
                 ii = subset[i:i+bs]
-                xb = torch.tensor(d["rgb"][ii].transpose(0, 3, 1, 2), dtype=torch.float32, device=DEVICE)
+                xb = torch.tensor(rgb_all[ii].transpose(0, 3, 1, 2), dtype=torch.float32, device=DEVICE)
                 lb = torch.tensor(d["labels"][ii], dtype=torch.int64, device=DEVICE)
                 seg, *_ = net.forward(xb, None, return_all=True)
                 # seg is at GRID res; downsample labels to match
@@ -447,7 +450,7 @@ def stage_real(net, epochs=10, bs=128, lr=3e-4):
             tot, nb = 0.0, 0
             for i in range(0, len(order), bs):
                 ii = order[i:i+bs]
-                xb = torch.tensor(d["rgb"][ii].transpose(0, 3, 1, 2), dtype=torch.float32, device=DEVICE)
+                xb = torch.tensor(rgb_all[ii].transpose(0, 3, 1, 2), dtype=torch.float32, device=DEVICE)
                 kb = torch.tensor(d["kind"][ii], dtype=torch.int64, device=DEVICE)
                 cb = torch.tensor(d["cell"][ii], dtype=torch.int64, device=DEVICE)
                 pb = torch.tensor(d["pct"][ii], dtype=torch.float32, device=DEVICE)

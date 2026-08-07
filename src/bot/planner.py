@@ -33,7 +33,7 @@ class PlannerConfig:
         corner_penalty: float = 0.35,
         max_beam_len: float = 0.34,      # as fraction of min(h, w)
         beams: int = SEARCH_DIRS,
-        attack_ratio_max: float = 0.6,   # only attack enemies smaller than this × me
+        attack_ratio_max: float = 0.75,  # only attack enemies smaller than this × me
     ) -> None:
         self.gain_weight = gain_weight
         self.risk_weight = risk_weight
@@ -85,10 +85,10 @@ class ClickPlannerConfig:
     def __init__(
         self,
         expand_pct: float = 12.0,          # slider % when expanding into neutral
-        attack_pct: float = 12.0,          # slider % for attacks (meta: 5-20)
+        attack_pct: float = 15.0,          # slider % for attacks (meta: 5-20)
         weak_balance_ratio: float = 0.35,  # enemy balance < this × mine = drained/weak
-        attack_balance_ratio: float = 2.0, # my balance > this × enemy = have 2:1 advantage
-        attack_density: float = 75.0,      # density at which we start attacking (near red ~100)
+        attack_balance_ratio: float = 1.5, # my balance > this × enemy = have 2:1 advantage
+        attack_density: float = 42.0,      # density at which we start attacking (was 75 — too passive)
         spend_density: float = 90.0,       # expand-to-spend threshold
         capped_density: float = 130.0,     # must-spend threshold
         expand_radius: int = 14,           # neutral-richness radius for expand target

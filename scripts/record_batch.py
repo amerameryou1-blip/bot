@@ -50,7 +50,7 @@ def main():
     for g in range(1, args.games + 1):
         start = time.time()
         if args.zoom == "alt":
-            zl = "1" if (g % 2 == 1) else "0"
+            zl = ["1", "0", "2", "1", "0", "2"][(g - 1) % 6]  # variety: 1-6% blob in some matches
         else:
             zl = args.zoom
         env = dict(os.environ, ZOOM_LEVEL=zl, PLAY_MINUTES=str(args.minutes),

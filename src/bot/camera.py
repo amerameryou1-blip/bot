@@ -249,6 +249,15 @@ def fix_camera(page, grab, self_rgb, bot_name: str | None = None,
             ticks += 1
             time.sleep(_TICK_DELAY_S)
             img = grab()
+            # retry once if the tick did not register (game animation may
+            # block wheel input right after spawn)
+            if self_blob_frac(img, self_rgb) <= frac * 1.1:
+                time.sleep(1.5)
+                b = _self_blob(img, self_rgb)
+                tx, ty = (int(b["cx"]), int(b["cy"])) if b else (640, 400)
+                _dispatch_wheel(page, tx, ty, _WHEEL_IN)
+                time.sleep(_TICK_DELAY_S)
+                img = grab()
         frac = self_blob_frac(img, self_rgb)
         log(f"[camera] forced ZOOM_LEVEL={force}: self={frac * 100:.2f}%")
 
