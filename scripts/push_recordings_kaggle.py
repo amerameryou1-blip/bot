@@ -23,9 +23,17 @@ def main():
     if not sessions:
         print("FAIL: no recordings found"); sys.exit(1)
     nframes = 0; nclicks = 0
+    kept = []
     for m in sessions:
         meta = json.load(open(m))
+        if meta.get("frames", 0) == 0:
+            print(f"  skip empty session {meta.get('session_id')}")
+            continue
         nframes += meta.get("frames", 0); nclicks += meta.get("clicks", 0)
+        kept.append(m)
+    sessions = kept
+    if not sessions:
+        print("FAIL: no usable recordings"); sys.exit(1)
     print(f"sessions={len(sessions)} frames={nframes} clicks={nclicks}")
 
     # 1) zip

@@ -260,6 +260,34 @@ def fix_camera(page, grab, self_rgb, bot_name: str | None = None,
                 img = grab()
         frac = self_blob_frac(img, self_rgb)
         log(f"[camera] forced ZOOM_LEVEL={force}: self={frac * 100:.2f}%")
+        # clamp overshoot / under-shoot: if forced ticks didn't register or
+        # overshot, fall back to the stepped auto search
+        if frac > TARGET_MAX or frac < TARGET_MIN * 0.5:
+            log("[camera] forced zoom out of window — running stepped auto search")
+            _STEP_IN, _STEP_OUT = -166, 166
+            for _ in range(8):
+                result = verify_view(img, self_rgb)
+                if result["pass"]:
+                    break
+                if result["self_frac"] >= TARGET_MAX * 100:
+                    delta = _STEP_OUT
+                elif result["self_frac"] < TARGET_MIN * 100:
+                    delta = _STEP_IN
+                else:
+                    delta = _STEP_OUT
+                b = _self_blob(img, self_rgb)
+                tx, ty = (int(b["cx"]), int(b["cy"])) if b else (640, 400)
+                if not _dispatch_wheel(page, tx, ty, delta):
+                    break
+                time.sleep(_TICK_DELAY_S)
+                img = grab()
+                new_frac = self_blob_frac(img, self_rgb)
+                if abs(new_frac - frac) < 1e-4:
+                    break
+                frac = new_frac
+                log(f"[camera] clamp step ({'IN' if delta < 0 else 'OUT'}): "
+                    f"self={frac * 100:.2f}%")
+            log(f"[camera] after clamp: self={frac * 100:.2f}%")
 
     if result is None:
         result = verify_view(img, self_rgb)
