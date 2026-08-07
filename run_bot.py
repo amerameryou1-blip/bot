@@ -218,7 +218,7 @@ def main() -> None:
                         min(h - 10, spot[1] + 40 * ((spot_attempt // 3) % 2) - 20))
             page.mouse.dblclick(spot[0], spot[1])
             log(f"double-clicked start position at {spot}")
-            time.sleep(2.5)
+            time.sleep(1.2)  # sample fast: the spawn aura (big, colored) is visible now
             palette = calibrate(page, spot=spot)
             if palette:
                 break
