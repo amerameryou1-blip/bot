@@ -19,7 +19,7 @@ def notebook_to_script(nb: dict) -> str:
     for c in nb["cells"]:
         if c["cell_type"] != "code":
             continue
-        src = "".join(c["source"])
+        src = "\n".join(c["source"])
         lines = []
         for line in src.split("\n"):
             if line.startswith("!"):
