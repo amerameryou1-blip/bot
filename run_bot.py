@@ -118,18 +118,24 @@ def detect_own_color(page, attempts=10) -> Palette | None:
     for spot in spots:
         page.mouse.dblclick(spot[0], spot[1])
         log(f"double-clicked ({spot[0]},{spot[1]})")
-        time.sleep(0.4)
-        img = grab(page)
-        c = spot_color(img, spot)
-        b = blob_area(img, c, tol=24)
-        log(f"  spot color={c} blob={b}")
-        if 8 < b < 0.02 * 1280 * 800:
+        found = None
+        for dt in (1.2, 2.6):
+            time.sleep(dt - (0.0 if found is None else 0))
+            img = grab(page)
+            c = spot_color(img, spot)
+            b = blob_area(img, c, tol=24)
+            log(f"  t+{dt:.1f}s spot color={c} blob={b}")
+            if 8 < b < 0.02 * 1280 * 800:
+                found = (c, b)
+                break
+        if found:
+            c, b = found
             log(f"SPAWN DETECTED at {spot}: color={c} blob={b}")
             return Palette(self_color=PlayerColor("me", *c), enemy_colors=[],
                            tolerance=24.0, downscale=2)
         # clear any selection state, try the next spot
         page.keyboard.press("Escape")
-        time.sleep(0.4)
+        time.sleep(0.5)
     return None
 
 
@@ -200,8 +206,8 @@ def main() -> None:
             })""")
             return next((e for e in els if text in e["text"]), None)
 
-        # 1) best-effort vivid color (does NOT block if it fails)
-        set_own_color(page)
+        # 1) no editor color changes — they shift scenario settings and break
+        #    the spawn phase. Detection is causal (spawn spot), no color set.
 
         # 2) Play (may need Escape if a panel is still open)
         play = btn("Play")
@@ -216,9 +222,9 @@ def main() -> None:
             log("NO Play button — aborting")
             browser.close()
             sys.exit(1)
-        time.sleep(6)
+        time.sleep(4)
 
-        # 3) detect own color via spawn diff (autonomous, no OCR)
+        # 3) detect own color via the spawn spot (autonomous, no OCR)
         palette = detect_own_color(page)
         if palette is None:
             log("no spawn detected after retries — saved frame")
