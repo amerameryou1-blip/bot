@@ -315,3 +315,39 @@ def center_lock_calibrate(page, grab, timeout_s: float = 30.0):
         return Palette(self_color=PlayerColor("me", *best), enemy_colors=enemies,
                        tolerance=48.0, downscale=2)
     return None
+
+
+def ocr_map_info(img: np.ndarray):
+    """OCR the 'Map: X / Dimension: WxH' text on the start screen (bottom-center).
+
+    Returns {"name": str, "w": int, "h": int} or None. Best-effort — used only
+    to tag recordings with the map identity.
+    """
+    if not _HAS_OCR:
+        return None
+    try:
+        from PIL import ImageOps
+        import pytesseract
+        pil = Image.fromarray(img)
+        H, W = pil.size
+        region = pil.crop((int(W * 0.30), int(H * 0.72), int(W * 0.75), int(H * 0.96)))
+        region = region.resize((region.width * 3, region.height * 3), Image.LANCZOS)
+        data = pytesseract.image_to_data(ImageOps.grayscale(region), config="--psm 6",
+                                         output_type=pytesseract.Output.DICT)
+        words = []
+        for i in range(len(data["text"])):
+            t = data["text"][i].strip()
+            if t:
+                words.append(t)
+        text = " ".join(words)
+        out = {"raw": text}
+        import re
+        m = re.search(r"Map:\s*([A-Za-z0-9 _\-]+)", text)
+        if m:
+            out["name"] = m.group(1).strip()
+        m = re.search(r"Dimension:\s*(\d+)\s*x\s*(\d+)", text)
+        if m:
+            out["w"], out["h"] = int(m.group(1)), int(m.group(2))
+        return out if ("name" in out or "w" in out) else None
+    except Exception:
+        return None

@@ -44,6 +44,7 @@ from bot.planner import ClickPlanner, ClickPlannerConfig
 from bot.economy import TroopTracker
 from bot.controls import MouseControls
 from bot.click_loop import ClickLoop
+from bot.recorder import GameRecorder
 
 FLAGS = [
     "--no-sandbox", "--disable-dev-shm-usage", "--use-gl=swiftshader", "--disable-gpu",
@@ -309,10 +310,12 @@ def make_planner() -> ClickPlanner:
     return ClickPlanner(cfg, TroopTracker(balance=512.0, land=12))
 
 
-def main() -> None:
+def main(record: bool = False, upload: bool = False,
+         play_minutes: float = PLAY_MINUTES) -> None:
     with open(LOG, "w") as f:
         f.write("bot session\n")
 
+    hf_token = os.environ.get("HF_TOKEN", "")
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True, args=FLAGS)
         ctx = browser.new_context(viewport={"width": 1280, "height": 800})
@@ -419,12 +422,27 @@ def main() -> None:
         seen_counts: dict = {}           # stability: colors seen steadily
         miss_counts: dict = {}           # colors missing steadily -> eliminated
         eliminated = 0
-        log(f"BOT PLAYING for {PLAY_MINUTES} min...")
-        while time.time() - start < PLAY_MINUTES * 60:
+
+        # optional real-match recorder (frames + clicks -> HF for training)
+        recorder = GameRecorder() if record else None
+        if recorder is not None:
+            try:
+                from bot.calibration import ocr_map_info
+                info = ocr_map_info(img) or {}
+                recorder.update_meta(
+                    bot_name=BOT_NAME, map=info.get("name"), map_dim=f"{info.get('w')}x{info.get('h')}" if "w" in info else None,
+                    self_color=[int(v) for v in palette.self_color.rgb],
+                    enemy_colors=[[int(v) for v in e.rgb] for e in enemy_colors],
+                    play_minutes=play_minutes)
+            except Exception as e:
+                log(f"  map-info OCR err: {e}")
+
+        log(f"BOT PLAYING for {play_minutes} min...")
+        while time.time() - start < play_minutes * 60:
             try:
                 loop = ClickLoop(capture=lambda: grab(page), palette=palette, brain=planner,
                                  controls=controls, loop_cfg=LoopConfig(hz=DECISION_HZ),
-                                 decision_interval_s=1.0 / DECISION_HZ)
+                                 decision_interval_s=1.0 / DECISION_HZ, recorder=recorder)
                 stats = loop.run(duration_s=8, max_ticks=int(DECISION_HZ * 8))
                 for k, v in stats.snapshot()["actions"].items():
                     action_counts[k] = action_counts.get(k, 0) + v
@@ -501,8 +519,25 @@ def main() -> None:
         log(json.dumps(report, indent=2))
         with open(os.path.join(OUT, "battle_report.json"), "w") as f:
             json.dump(report, f, indent=2)
+        if recorder is not None:
+            recorder.finish(report, upload=upload, hf_token=hf_token)
         browser.close()
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+    ap = argparse.ArgumentParser(description="Territorial.io autonomous bot")
+    ap.add_argument("--record", action="store_true",
+                    help="record frames+clicks of each match (for NN training)")
+    ap.add_argument("--games", type=int, default=1,
+                    help="play N consecutive custom-scenario matches (default 1)")
+    ap.add_argument("--upload", action="store_true",
+                    help="upload recordings to HF (needs HF_TOKEN env)")
+    ap.add_argument("--minutes", type=float, default=PLAY_MINUTES,
+                    help="minutes per match (default from PLAY_MINUTES env)")
+    args = ap.parse_args()
+
+    for g in range(args.games):
+        log(f"===== MATCH {g + 1}/{args.games} =====")
+        main(record=args.record, upload=args.upload, play_minutes=args.minutes)
+    log("ALL MATCHES DONE")

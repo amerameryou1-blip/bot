@@ -126,3 +126,32 @@ south_america, asia, australia, british_isles, mare_nostrum.
 
 Use: rebuild sim maps at REAL dimensions/coastlines (per-map land% from OCR
 is the validation target), and as the seed for real-frame vision fine-tuning.
+
+
+## 🧪 v8 build (quality-first — built 2026-08-07 while you slept)
+
+**Real maps from real screenshots** (`scripts/rebuild_maps.py`): extracted
+coastlines/water/mountains from the 26 start-phase screenshots. **7 maps
+validated PASS** (land/water/mountain% within ±5 of the in-game OCR stats):
+island, desert, pond, island_kingdom, middle_east, white_arena, black_arena.
+The other 19 fail LOUDLY (ambiguous gray-land in those screenshots) — never
+silently shipped. Preview + ascii stored in `weights/maps/`.
+
+**Recorder** (`src/bot/recorder.py`, `run_bot.py --record --games N --upload`):
+records every frame + every click the bot makes + self/enemy colors + map
+name (OCR) per match, uploads to HF `amer224/territorial-bot-data/recordings/`.
+This is the real-click ground truth ("where to click per pixel").
+
+**Auto-labeler** (`scripts/label_real.py`): turns recordings + screenshots into
+5-class per-pixel labels (water/neutral/me/enemy/ui) + click targets. Verified
+locally.
+
+**Sim v8** (`src/sim/game6.py`): real maps, 8-15 enemies, mixed-skill lobbies,
+vivid real colors, kill tracking. **Trainer v8** (`scripts/train_nn.py`):
+reward = growth + kill ×2 + win +5 (last survivor!) − idle penalty;
+curriculum escalates BOTH skill (easy→medium→hard) AND enemy count (2→…→10).
+`stage_real` fine-tunes vision on real frames + clones clicks on real clicks.
+Verified: PPO smoke run works on CPU, curriculum fires.
+
+**Kaggle notebook updated** (`kaggle-push/kaggle_train_nn.ipynb`): pulls real
+recordings from HF → auto-labels → vision+clone+real → PPO v8 on real maps.

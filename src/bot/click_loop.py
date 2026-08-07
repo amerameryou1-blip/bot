@@ -51,6 +51,7 @@ class ClickLoop:
         loop_cfg: LoopConfig | None = None,
         log=print,
         decision_interval_s: float = 0.4,
+        recorder=None,
     ) -> None:
         self.capture = capture
         self.palette = palette
@@ -61,6 +62,7 @@ class ClickLoop:
         self.stats = ClickStats()
         self.decision_interval = decision_interval_s
         self._last_decision = 0.0
+        self.recorder = recorder  # optional GameRecorder (records frames+actions)
 
     def run(self, duration_s: float | None = None, max_ticks: int | None = None) -> ClickStats:
         started = time.perf_counter()
@@ -83,6 +85,12 @@ class ClickLoop:
         state = segment(frame, self.palette)
         action = self.brain.decide(state)
         self.stats.record(action)
+
+        if self.recorder is not None:
+            f_idx = self.recorder.record_frame(frame, t=t0)
+            self.recorder.record_click(t0, action.x, action.y, action.kind,
+                                       getattr(action, "pct", None), f_idx,
+                                       getattr(action, "reason_label", ""))
 
         # execute the action
         try:

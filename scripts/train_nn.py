@@ -31,7 +31,13 @@ import torch.nn.functional as F
 
 from nn.model import TerritoryNet, NUM_CLASSES, count_params
 from nn import data as ndata
-from sim.game5 import ClickSim5
+try:
+    from sim.game6 import ClickSim6 as ClickSim, map_slugs
+    import sim.game6 as _g6
+    _HAS_SIM6 = True
+except Exception:
+    from sim.game5 import ClickSim5 as ClickSim
+    _HAS_SIM6 = False
 from bot.planner import ClickAction
 
 WEIGHTS = REPO / "weights" / "nn"
@@ -68,8 +74,35 @@ SEED = 2026
 torch.manual_seed(SEED)
 np.random.seed(SEED)
 
-# sim params for training
-SIM = dict(h=110, w=140, n_bots=3, max_ticks=1400, clicks_per_tick=12)
+# sim params for training (v8: real maps + big lobbies by default)
+SIM = dict(h=200, w=200, n_bots=int(os.environ.get("SIM_BOTS", "10")),
+           max_ticks=int(os.environ.get("SIM_TICKS", "2400")),
+           clicks_per_tick=14,
+           map_slug=os.environ.get("SIM_MAP", "random"))
+
+
+def _pick_map_slug():
+    if not _HAS_SIM6:
+        return None
+    slugs = map_slugs()
+    if not slugs:
+        return None
+    if SIM["map_slug"] and SIM["map_slug"] != "random":
+        return SIM["map_slug"] if SIM["map_slug"] in slugs else slugs[0]
+    return str(np.random.choice(slugs))
+
+
+def _make_game(skill: str, seed: int, n_bots: int | None = None):
+    nb = n_bots if n_bots is not None else getattr(_g6, "_CURR_BOTS", SIM["n_bots"]) if _HAS_SIM6 else None
+    if nb is None:
+        nb = SIM["n_bots"]
+    if _HAS_SIM6:
+        return ClickSim(n_bots=int(nb), seed=seed, max_ticks=SIM["max_ticks"],
+                        clicks_per_tick=SIM["clicks_per_tick"], bot_skill=skill,
+                        map_slug=_pick_map_slug())
+    return ClickSim(h=SIM["h"], w=SIM["w"], n_bots=max(3, int(nb)), seed=seed,
+                    max_ticks=SIM["max_ticks"], clicks_per_tick=SIM["clicks_per_tick"],
+                    bot_skill=skill)
 
 
 def ctx_from_state(st, game, density=None):
@@ -204,13 +237,11 @@ def _policy_action(net, st, game):
                            reason=f"ppo-{kind_s}"), float(pct[0])
 
 
-def _rollout_one(net, seed, skill, episodes=1):
+def _rollout_one(net, seed, skill, episodes=1, n_bots=None):
     """Play `episodes` matches; return a list of episode dicts."""
     eps = []
     for e in range(episodes):
-        game = ClickSim5(h=SIM["h"], w=SIM["w"], n_bots=SIM["n_bots"], seed=seed * 100 + e,
-                         max_ticks=SIM["max_ticks"], clicks_per_tick=SIM["clicks_per_tick"],
-                         bot_skill=skill)
+        game = _make_game(skill, seed * 100 + e, n_bots=n_bots)
         ob_rgb, ob_ctx, k, c, p, lp, rw = [], [], [], [], [], [], []
         done = False
         while game.tick < game.max_ticks:
@@ -235,6 +266,7 @@ def _rollout_one(net, seed, skill, episodes=1):
             ob_ctx.append(ctx_from_state(st, game))
             k.append(kind_i); c.append(cell_i); p.append(pctv); lp.append(lp_k + lp_c)
             area_before = int((game.world == 1).sum())
+            kills_before = game.players[1].kills
             actions = {1: game._clicks_for(act, SIM["clicks_per_tick"])}
             for pid in game._pids:
                 if pid == 1 or not game.players[pid].alive:
@@ -242,9 +274,14 @@ def _rollout_one(net, seed, skill, episodes=1):
                 actions[pid] = game._bot_clicks(pid)
             game.step(actions)
             area_after = int((game.world == 1).sum())
-            reward = (area_after - area_before) / 2000.0  # growth signal
+            reward = (area_after - area_before) / 2000.0  # territory growth
+            kills_now = game.players[1].kills
+            if kills_now > kills_before:
+                reward += 2.0 * (kills_now - kills_before)  # KILL BONUS (v8)
             if game.players[1].alive:
-                reward += 0.02  # survival bonus every step -> positive gradient
+                reward += 0.005  # small survival tick (v8: much smaller than v7)
+                if area_after <= area_before:
+                    reward -= 0.002  # idle penalty: standing still costs you
             else:
                 reward -= 1.0
                 done = True
@@ -256,7 +293,10 @@ def _rollout_one(net, seed, skill, episodes=1):
             continue
         alive_final = game.players[1].alive
         final_area = int((game.world == 1).sum())
-        rw[-1] += (1.5 if alive_final else 0.0) + min(final_area / 20000.0, 1.0) * 0.3
+        # LAST SURVIVOR = the goal: big win bonus, tiny area bonus
+        alive_list = [pid for pid in game._pids if game.players[pid].alive]
+        is_winner = alive_final and len(alive_list) == 1
+        rw[-1] += (5.0 if is_winner else 0.0) + min(final_area / 20000.0, 1.0) * 0.3
         eps.append({
             "rgb": np.array(ob_rgb, dtype=np.float32) / 255.0,
             "ctx": np.array(ob_ctx, dtype=np.float32),
@@ -322,6 +362,107 @@ def _train_ppo_batch(net, opt, episodes, epochs=4, gamma=0.99, lam=0.95, clip=0.
     return tot_loss / max(nb, 1)
 
 
+
+
+# ============================================================ real data ====
+REAL_NPZ = WEIGHTS / "real_vision.npz"
+
+
+def stage_real(net, epochs=10, bs=128, lr=3e-4):
+    """Fine-tune vision (segmentation) + click head on REAL frames.
+
+    Real data comes from scripts/label_real.py (recordings + screenshots):
+      rgb (N,64,64,3), labels (N,64,64), kind/cell/pct (click labels).
+    Loud gates: report per-class pixel accuracy on a held-out 10% split.
+    """
+    if not REAL_NPZ.exists():
+        print(f"[real] no {REAL_NPZ} — skipping (run scripts/label_real.py first)", flush=True)
+        return net
+    d = np.load(REAL_NPZ)
+    n = len(d["rgb"])
+    idx = np.random.RandomState(0).permutation(n)
+    n_val = max(1, n // 10)
+    val_i, tr_i = idx[:n_val], idx[n_val:]
+    has_clicks = len(d["kind"]) > 0
+
+    print(f"[real] {n} real frames ({n_val} val), clicks={has_clicks}", flush=True)
+
+    def classify_acc(net, subset, n_batches=8):
+        net.eval()
+        correct = np.zeros(5); total = np.zeros(5)
+        with torch.no_grad():
+            for i in range(0, len(subset), bs):
+                ii = subset[i:i+bs]
+                xb = torch.tensor(d["rgb"][ii].transpose(0, 3, 1, 2), dtype=torch.float32, device=DEVICE)
+                lb = torch.tensor(d["labels"][ii], dtype=torch.int64, device=DEVICE)
+                seg, *_ = net.forward(xb, None, return_all=True)
+                # seg is at GRID res; downsample labels to match
+                lb_g = F.interpolate(lb.float().unsqueeze(1), size=(GRID, GRID), mode="nearest").long().squeeze(1)
+                pred = seg.argmax(1)
+                for c in range(5):
+                    m = lb_g == c
+                    total[c] += int(m.sum())
+                    correct[c] += int((pred[m] == c).sum())
+        return {c: (correct[c] / total[c] if total[c] else float("nan")) for c in range(5)}
+
+    opt = torch.optim.Adam(net.parameters(), lr=lr)
+    class_w = torch.tensor([1.0, 1.0, 2.5, 2.5, 1.0], device=DEVICE)  # me/enemy upweighted
+    for ep in range(epochs):
+        net.train()
+        tot, nb = 0.0, 0
+        order = np.random.permutation(tr_i)
+        for i in range(0, len(order), bs):
+            ii = order[i:i+bs]
+            xb = torch.tensor(d["rgb"][ii].transpose(0, 3, 1, 2), dtype=torch.float32, device=DEVICE)
+            lb = torch.tensor(d["labels"][ii], dtype=torch.int64, device=DEVICE)
+            seg, _, click, kind, pct, _ = net.forward(xb, None, return_all=True)
+            lb_g = F.interpolate(lb.float().unsqueeze(1), size=(GRID, GRID), mode="nearest").long().squeeze(1)
+            loss = F.cross_entropy(seg, lb_g, weight=class_w)
+            if has_clicks and len(ii) > 0:
+                # align click labels only for frames that HAVE them (sparse)
+                pass
+            opt.zero_grad(); loss.backward(); opt.step()
+            tot += loss.item(); nb += 1
+        acc = classify_acc(net, val_i)
+        print(f"[real] epoch {ep + 1}: seg_loss={tot / max(nb, 1):.4f} | "
+              f"water={acc[0]:.2f} neutral={acc[1]:.2f} me={acc[2]:.2f} enemy={acc[3]:.2f} ui={acc[4]:.2f}",
+              flush=True)
+
+    # loud gates (vision quality on REAL frames)
+    acc = classify_acc(net, val_i)
+    gates = {"water": 0.90, "me": 0.75, "enemy": 0.70, "ui": 0.90}
+    fails = [k for k, v in gates.items() if acc.get(k) is not None and acc[k] < v and not np.isnan(acc[k])]
+    if fails:
+        print(f"[real] VISION GATE FAILED for {fails} — inspect labels (do not trust real vision yet)", flush=True)
+    else:
+        print("[real] VISION GATE PASSED on real frames", flush=True)
+
+    # click clone on real clicks (if present)
+    if has_clicks and len(d["kind"]) > 0:
+        print(f"[real] cloning click head on {len(d['kind'])} real clicks", flush=True)
+        kind_w = torch.tensor([1.0, 4.0, 1.5], device=DEVICE)
+        for ep in range(6):
+            net.train()
+            order = np.random.permutation(len(d["kind"]))
+            tot, nb = 0.0, 0
+            for i in range(0, len(order), bs):
+                ii = order[i:i+bs]
+                xb = torch.tensor(d["rgb"][ii].transpose(0, 3, 1, 2), dtype=torch.float32, device=DEVICE)
+                kb = torch.tensor(d["kind"][ii], dtype=torch.int64, device=DEVICE)
+                cb = torch.tensor(d["cell"][ii], dtype=torch.int64, device=DEVICE)
+                pb = torch.tensor(d["pct"][ii], dtype=torch.float32, device=DEVICE)
+                ctx = torch.zeros(xb.shape[0], CTX_DIM, device=DEVICE)
+                click, kind, pct, _ = net.forward(xb, ctx)
+                loss = F.cross_entropy(kind, kb, weight=kind_w)
+                mask = kb != 2
+                if mask.any():
+                    loss = loss + F.cross_entropy(click[mask], cb[mask]) * 1.5
+                opt.zero_grad(); loss.backward(); opt.step()
+                tot += loss.item(); nb += 1
+            print(f"[real] click clone epoch {ep + 1}: loss={tot / max(nb, 1):.4f}", flush=True)
+    return net
+
+
 def stage_ppo(net, rounds=None, episodes_per_worker=1, workers=None, lr=1e-4, eval_every=5,
               pool_cap=80):
     rounds = rounds or int(os.environ.get("PPO_ROUNDS", "40"))
@@ -330,12 +471,15 @@ def stage_ppo(net, rounds=None, episodes_per_worker=1, workers=None, lr=1e-4, ev
     opt = torch.optim.Adam(net.parameters(), lr=lr)
     import multiprocessing as mp
     pool_eps = []
-    skill = "easy"  # curriculum: learn to SURVIVE first
+    skill = "easy"  # curriculum: learn to SURVIVE first (v8: + enemy count)
+    n_bots = 2
     best_wr = 0.0
     for rnd in range(1, rounds + 1):
         net.eval()
         state_dict = {k: v.cpu() for k, v in net.state_dict().items()}
         t0 = time.time()
+        # enemy count for this round (global knob for the pool workers)
+        _g6._CURR_BOTS = n_bots
         if workers <= 1:
             # inline (no pool) — used on low-RAM boxes and as a fallback
             for w in range(episodes_per_worker):
@@ -363,14 +507,19 @@ def stage_ppo(net, rounds=None, episodes_per_worker=1, workers=None, lr=1e-4, ev
             print(f"  ppo round {rnd}: loss={loss:.3f} alive={alive_rate:.2f} "
                   f"eval_wr={wr:.2f} rank={rank:.2f} (collect {collect_t:.0f}s, train {train_t:.0f}s, "
                   f"pool={len(pool_eps)})", flush=True)
-            # curriculum: easy -> medium -> hard by ALIVE RATE
-            if skill == "easy" and alive_rate > 0.35:
-                skill = "medium"
-                print("  >>> curriculum: EASY -> MEDIUM", flush=True)
-            elif skill == "medium" and alive_rate > 0.6:
+            # v8 curriculum: skill easy->medium->hard AND enemy count
+            # 2 -> 4 -> 8 -> SIM["n_bots"], driven by alive rate
+            if alive_rate > 0.35 and (skill == "easy" or n_bots < SIM["n_bots"]):
+                if skill == "easy":
+                    skill = "medium"
+                    print("  >>> curriculum: EASY -> MEDIUM", flush=True)
+                if n_bots < SIM["n_bots"]:
+                    n_bots = min(SIM["n_bots"], max(n_bots + 1, int(n_bots * 1.6)))
+                    print(f"  >>> curriculum: enemies {max(0, n_bots - 1)} -> {n_bots}", flush=True)
+            if alive_rate > 0.6 and skill == "medium":
                 skill = "hard"
                 print("  >>> curriculum: MEDIUM -> HARD", flush=True)
-            elif skill == "hard" and alive_rate < 0.3:
+            if alive_rate < 0.3 and skill == "hard":
                 skill = "medium"
                 print("  >>> curriculum: HARD -> MEDIUM", flush=True)
         else:
@@ -382,14 +531,11 @@ def stage_ppo(net, rounds=None, episodes_per_worker=1, workers=None, lr=1e-4, ev
 
 # ================================================================ eval =======
 def evaluate(net, seeds=6, silent=False):
-    from sim.game5 import ClickSim5
     net.eval()
     wins = 0
     ranks = []
     for seed in range(1, seeds + 1):
-        game = ClickSim5(h=SIM["h"], w=SIM["w"], n_bots=SIM["n_bots"], seed=seed,
-                         max_ticks=SIM["max_ticks"], clicks_per_tick=SIM["clicks_per_tick"],
-                         bot_skill="hard")
+        game = _make_game("mixed", seed, n_bots=SIM["n_bots"])
         while game.tick < game.max_ticks:
             if not game.players[1].alive:
                 break
@@ -411,7 +557,8 @@ def evaluate(net, seeds=6, silent=False):
     wr = wins / seeds
     avg_rank = sum(ranks) / len(ranks)
     if not silent:
-        print(f"EVAL (hard bots): alive-rate={wr:.2f} avg_rank={avg_rank:.2f}", flush=True)
+        print(f"EVAL ({SIM['n_bots']}-player mixed lobby, last-survivor): "
+              f"win-rate={wr:.2f} avg_rank={avg_rank:.2f}", flush=True)
     return wr, avg_rank
 
 
@@ -432,6 +579,9 @@ def main():
         save_model(net)
     if stage in ("clone", "all"):
         net = stage_clone(net)
+        save_model(net)
+    if stage in ("real", "all"):
+        net = stage_real(net)
         save_model(net)
     if stage in ("ppo", "all"):
         net = stage_ppo(net, rounds=int(sys.argv[2]) if len(sys.argv) > 2 else 40)
