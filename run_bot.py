@@ -28,7 +28,11 @@ PLAY_MINUTES = float(os.environ.get("PLAY_MINUTES", "4"))
 DECISION_HZ = float(os.environ.get("DECISION_HZ", "2.5"))  # click decisions per second
 MAX_FRAMES_KEEP = 60
 _MANUAL = os.environ.get("MANUAL_COLOR", "").strip()
-MANUAL_COLOR = json.loads(_MANUAL) if _MANUAL else None  # e.g. "[242, 216, 63]"
+MANUAL_COLOR = json.loads(_MANUAL) if _MANUAL else None
+# ^ RELIABLE WAY: in the Custom Scenario editor pick a VIVID color for yourself
+#   (Settings -> Colors), then set MANUAL_COLOR = "[r, g, b]" (e.g. "[255, 60, 60]").
+#   The game can assign you a color that matches the map terrain, which breaks
+#   pixel vision — a vivid manual color avoids that entirely.
 
 # output dir: Kaggle working dir if present, else ./bot_output
 OUT = os.environ.get("KAGGLE_WORKING", "/kaggle/working") if os.path.isdir("/kaggle/working") else os.path.join(
@@ -104,14 +108,46 @@ def ocr_balance(page) -> int | None:
         return None
 
 
-def calibrate(page) -> Palette | None:
+def color_at_spot(img, spot) -> list[int] | None:
+    """My territory spawns exactly where I double-clicked. Sample the brightest
+    saturated color in a patch around that spot — that's my color."""
+    from collections import Counter
+    x, y = spot
+    h, w = img.shape[:2]
+    x0, x1 = max(0, x - 16), min(w, x + 16)
+    y0, y1 = max(0, y - 16), min(h, y + 16)
+    patch = img[y0:y1, x0:x1].reshape(-1, 3).astype(int)
+    q = (patch // 16 * 16)
+    counts = Counter(map(tuple, q))
+    cands = [(list(c), n) for c, n in counts.most_common(10)
+             if max(c) > 120 and (max(c) - min(c)) > 50]
+    if not cands:
+        return None
+    cands.sort(key=lambda x: -x[1])
+    return cands[0][0]
+
+
+def calibrate(page, spot=None) -> Palette | None:
     if MANUAL_COLOR is not None:
         log(f"using MANUAL_COLOR {MANUAL_COLOR}")
         return Palette(self_color=PlayerColor("me", *MANUAL_COLOR), enemy_colors=[],
-                       tolerance=48.0, downscale=2)
-    log("auto-calibrating from leaderboard...")
-    log("  TIP: for reliable play, pick a VIVID color (red/orange/blue/purple) in the")
-    log("       Custom Scenario editor, then set MANUAL_COLOR = [r, g, b] in run_bot.py")
+                       tolerance=24.0, downscale=2)
+    # PRIMARY: my territory spawns at the double-click spot — sample it there.
+    if spot is not None:
+        img = grab(page)
+        color = color_at_spot(img, spot)
+        if color is not None:
+            # Reject terrain-like colors: a real territory is small and NOT a
+            # dominant map color. If my assigned color == terrain, reject and
+            # tell the user to pick a vivid color (MANUAL_COLOR).
+            from bot.calibration import validate_territory_color
+            if validate_territory_color(img, color, tol=24):
+                log(f"CALIBRATED via spawn-spot: {color}")
+                return Palette(self_color=PlayerColor("me", *color), enemy_colors=[],
+                               tolerance=24.0, downscale=2)
+            log(f"spawn-spot color {color} rejected (looks like terrain/map color)")
+    # FALLBACK: leaderboard swatch
+    log("calibrating from leaderboard (fallback)...")
     for attempt in range(4):
         img = grab(page)
         pal, reason = calibrate_from_leaderboard(img, BOT_NAME)
@@ -176,8 +212,8 @@ def main() -> None:
                         min(h - 10, spot[1] + 40 * ((spot_attempt // 3) % 2) - 20))
             page.mouse.dblclick(spot[0], spot[1])
             log(f"double-clicked start position at {spot}")
-            time.sleep(5)
-            palette = calibrate(page)
+            time.sleep(2.5)
+            palette = calibrate(page, spot=spot)
             if palette:
                 break
             snapshot(page, "calib_fail")  # keep a frame so the user can see
@@ -193,7 +229,6 @@ def main() -> None:
         action_counts: dict[str, int] = {}
         start = time.time()
         last_shot = time.time()
-        last_ocr = time.time()
         log(f"BOT PLAYING for {PLAY_MINUTES} min...")
         while time.time() - start < PLAY_MINUTES * 60:
             loop = ClickLoop(capture=lambda: grab(page), palette=palette, brain=planner,
@@ -211,12 +246,6 @@ def main() -> None:
                                             "area": st.self_blob.area})
             except Exception:
                 pass
-            if time.time() - last_ocr > 6:
-                bal = ocr_balance(page)
-                if bal:
-                    planner.set_observed_balance(bal)
-                    log(f"  OCR balance={bal}")
-                last_ocr = time.time()
             if time.time() - last_shot > 5:
                 snapshot(page)
                 last_shot = time.time()
