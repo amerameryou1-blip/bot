@@ -78,61 +78,58 @@ def grab(page) -> np.ndarray:
     return np.array(Image.open(io.BytesIO(page.screenshot())).convert("RGB"))
 
 
-def land_spots(img, n=8) -> list[tuple[int, int]]:
-    """Candidate land pixels (not ocean) to try for the start double-click."""
+def land_spots(img, n=10) -> list[tuple[int, int]]:
+    """Candidate land pixels (not ocean, not leaderboard/bottom UI)."""
     px = img.astype(int)
     r, g, b = px[:, :, 0], px[:, :, 1], px[:, :, 2]
     is_land = ~((b > r + 20) & (b > 80)) & (px.max(axis=2) >= 60)
-    ys, xs = np.where(is_land)
+    # avoid the leaderboard (top-left) and bottom UI strip
+    yy, xx = np.mgrid[0:img.shape[0], 0:img.shape[1]]
+    ok = is_land & (yy > 320) & (xx > 500) & (yy < 740)
+    ys, xs = np.where(ok)
+    if not len(ys):
+        ys, xs = np.where(is_land)
     if not len(ys):
         return [(640, 400)] * n
-    rng = np.random.default_rng(7)
+    rng = np.random.default_rng(3)
     idx = rng.choice(len(ys), size=min(n, len(ys)), replace=False)
     return [(int(xs[i]), int(ys[i])) for i in idx]
 
 
-def spawn_detect(before, after, spot, radius=160):
-    """Find the NEW small colored blob that appeared near `spot` after a click.
-
-    Returns (color, global_blob_area) or (None, 0). The spawn makes a small
-    colored territory appear at the clicked spot — causal, no OCR.
-    """
+def spot_color(img, spot) -> list[int]:
+    """Mean color of a small patch at the spot."""
     x, y = spot
-    h, w = before.shape[:2]
-    x0, x1 = max(0, x - radius), min(w, x + radius)
-    y0, y1 = max(0, y - radius), min(h, y + radius)
-    d = np.abs(before[y0:y1, x0:x1].astype(int) - after[y0:y1, x0:x1].astype(int)).sum(axis=2)
-    changed = d > 60
-    if changed.sum() < 8:
-        return None, 0
-    px = after[y0:y1, x0:x1][changed].astype(int)
-    q = (px // 16 * 16)
-    counts = Counter(map(tuple, q))
-    cands = [(list(c), n) for c, n in counts.most_common(8) if max(c) > 90 and (max(c) - min(c)) > 40]
-    if not cands:
-        return None, 0
-    cands.sort(key=lambda x: -x[1])
-    color = cands[0][0]
-    m = np.all(np.abs(after.astype(int) - np.array(color)) < 24, axis=2)
-    return color, int(m.sum())
+    h, w = img.shape[:2]
+    patch = img[max(0, y - 3):min(h, y + 4), max(0, x - 3):min(w, x + 4)].reshape(-1, 3).astype(int)
+    return patch.mean(axis=0).astype(int).tolist()
 
 
-def detect_own_color(page, attempts=8) -> Palette | None:
-    """Double-click land spots until a spawn appears; return the palette."""
+def blob_area(img, color, tol=24) -> int:
+    m = np.all(np.abs(img.astype(int) - np.array(color)) < tol, axis=2)
+    return int(m.sum())
+
+
+def detect_own_color(page, attempts=10) -> Palette | None:
+    """Double-click land spots; the spawn makes a SMALL colored blob appear at
+    the click point. Sample the click-point color at 0.4s — if its global blob
+    is small (<2% frame), that's OUR territory color (causal, no OCR)."""
     img = grab(page)
     spots = land_spots(img)
-    for i, spot in enumerate(spots):
-        before = grab(page)
+    for spot in spots:
         page.mouse.dblclick(spot[0], spot[1])
         log(f"double-clicked ({spot[0]},{spot[1]})")
-        time.sleep(1.0)
-        after = grab(page)
-        color, blob = spawn_detect(before, after, spot)
-        if color and 8 < blob < 0.02 * 1280 * 800:
-            log(f"SPAWN DETECTED at {spot}: color={color} blob={blob}")
-            return Palette(self_color=PlayerColor("me", *color), enemy_colors=[],
+        time.sleep(0.4)
+        img = grab(page)
+        c = spot_color(img, spot)
+        b = blob_area(img, c, tol=24)
+        log(f"  spot color={c} blob={b}")
+        if 8 < b < 0.02 * 1280 * 800:
+            log(f"SPAWN DETECTED at {spot}: color={c} blob={b}")
+            return Palette(self_color=PlayerColor("me", *c), enemy_colors=[],
                            tolerance=24.0, downscale=2)
-        log(f"  no spawn at {spot} (color={color} blob={blob}) — next spot")
+        # clear any selection state, try the next spot
+        page.keyboard.press("Escape")
+        time.sleep(0.4)
     return None
 
 
