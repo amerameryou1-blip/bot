@@ -5,3 +5,4 @@ bot_output/
 weights/nn/
 recordings/
 probe_out/
+bot-train-nn.ipynb

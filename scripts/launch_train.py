@@ -28,9 +28,9 @@ def main():
         if c["cell_type"] != "code":
             continue
         src = "\n".join(c["source"])
-        if "os.environ.get('HF_TOKEN', '')" in src:
-            src = src.replace("os.environ.get('HF_TOKEN', '')",
-                              "os.environ.get('HF_TOKEN', '" + hf + "')")
+        if 'os.environ.get("HF_TOKEN", "")' in src:
+            src = src.replace('os.environ.get("HF_TOKEN", "")',
+                              'os.environ.get("HF_TOKEN", "' + hf + '")')
             c["source"] = src.split("\n")
             injected += 1
     if args.rounds:
