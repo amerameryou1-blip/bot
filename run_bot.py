@@ -126,8 +126,15 @@ def small_territory_colors(img, max_frac=0.03, min_area=60):
     out = []
     for c, _ in Counter(map(tuple, q)).most_common(40):
         area = blob_area(img, list(c), tol=20)
-        if min_area < area < limit:
-            out.append((list(c), area))
+        if not (min_area < area < limit):
+            continue
+        # exclude UI zones: bottom bar (y>730) and leaderboard top-left
+        m = np.all(np.abs(img.astype(int) - np.array(c)) < 20, axis=2)
+        coords = np.argwhere(m)
+        if len(coords):
+            if coords[:, 0].mean() > 730 or (coords[:, 0].mean() < 340 and coords[:, 1].mean() < 500):
+                continue
+        out.append((list(c), area))
     out.sort(key=lambda x: x[1])
     return out
 
@@ -229,7 +236,13 @@ def main() -> None:
         # 1) no editor color changes — they shift scenario settings and break
         #    the spawn phase. Detection is causal (spawn spot), no color set.
 
-        # 2) Play (may need Escape if a panel is still open)
+        # 2) Reset the scenario to defaults (persistent editor state can differ
+        #    between machines/sessions and shift the layout) then Play.
+        reset = btn("Reset Scenario")
+        if reset:
+            page.mouse.click(reset["x"], reset["y"])
+            log("reset scenario to defaults")
+            time.sleep(3)
         play = btn("Play")
         if not play:
             page.keyboard.press("Escape")
