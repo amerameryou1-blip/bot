@@ -2,3 +2,6 @@ playwright
 pillow
 numpy
 pytesseract
+torch
+huggingface_hub
+safetensors
