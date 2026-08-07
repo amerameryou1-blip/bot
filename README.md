@@ -36,7 +36,20 @@ Map
 
 **Training run:** Kaggle GPU notebook `amerameryou/bot-train-nn` (T4 GPU, Internet on)
 **Pipeline:** collect (CPU-parallel, medium bots) → vision (GPU) → clone (GPU) → PPO (GPU, curriculum medium→hard) → HF upload
-**Status (v7):** main trainer RUNNING — 4 data workers COMPLETE ✅ — last checked 2026-08-07 ~16:30 UTC
+**Status (v7):** main trainer **COMPLETE** ✅ (verified 2026-08-07) — 4 data workers COMPLETE ✅
+
+**v7 run result (from the kernel log — the honest numbers):**
+- Pipeline ran end-to-end on the P100: torch 2.4.1+cu121 installed itself, CUDA OK,
+  collect 3,673 samples → merged 1 HF shard → vision (loss 2.06→1.24) → clone
+  (loss 9.08→5.57) → 100 PPO rounds → eval. No silent failures.
+- ✅ **It learned to SURVIVE vs easy bots**: PPO alive-rate went 0.00 → 0.25–1.00,
+  curriculum auto-moved easy→medium→hard (multiple times).
+- ❌ **It still CANNOT WIN**: every eval vs hard bots = alive 0.00, win-rate 0.00,
+  rank 2.83/4 (finishes 3rd, never 1st). Training data was tiny (3,823 samples)
+  and the survival bonus teaches hiding, not attacking.
+- Lesson: survival reward fixes "dying instantly" but not "never attacks".
+  → next version (v8, see QUALITY_PLAN.md) reshapes rewards around kills/territory
+  growth/win + many enemies (8–15) + real-map sim + real-screenshot vision.
 
 **Reusable data saved to Hugging Face (for future bigger models):**
 `amer224/territorial-bot-data` (dataset repo, private) — pull anytime with
