@@ -133,19 +133,25 @@ def calibrate(page, spot=None) -> Palette | None:
         return Palette(self_color=PlayerColor("me", *MANUAL_COLOR), enemy_colors=[],
                        tolerance=24.0, downscale=2)
     # PRIMARY: my territory spawns at the double-click spot — sample it there.
+    # This is CAUSAL (my click made that color appear), so we only require a
+    # compact blob near the spot — no dominance check (the color may legitimately
+    # resemble terrain elsewhere on the map).
     if spot is not None:
         img = grab(page)
         color = color_at_spot(img, spot)
         if color is not None:
-            # Reject terrain-like colors: a real territory is small and NOT a
-            # dominant map color. If my assigned color == terrain, reject and
-            # tell the user to pick a vivid color (MANUAL_COLOR).
-            from bot.calibration import validate_territory_color
-            if validate_territory_color(img, color, tol=24):
-                log(f"CALIBRATED via spawn-spot: {color}")
-                return Palette(self_color=PlayerColor("me", *color), enemy_colors=[],
-                               tolerance=24.0, downscale=2)
-            log(f"spawn-spot color {color} rejected (looks like terrain/map color)")
+            from bot.calibration import blob, edges_touched
+            b = blob(img, color, tol=24, min_area=6)
+            if b:
+                H, W = img.shape[:2]
+                near_spot = abs(b["cx"] - spot[0]) < 120 and abs(b["cy"] - spot[1]) < 120
+                if (b["area"] / (H * W)) < 0.4 and edges_touched(b["mask"]) < 3 and near_spot:
+                    log(f"CALIBRATED via spawn-spot: {color} (area={b['area']})")
+                    return Palette(self_color=PlayerColor("me", *color), enemy_colors=[],
+                                   tolerance=24.0, downscale=2)
+                log(f"spawn-spot color {color}: blob invalid (area={b['area']}, near_spot={near_spot})")
+            else:
+                log(f"spawn-spot color {color}: no blob found")
     # FALLBACK: leaderboard swatch
     log("calibrating from leaderboard (fallback)...")
     for attempt in range(4):
@@ -218,7 +224,12 @@ def main() -> None:
                 break
             snapshot(page, "calib_fail")  # keep a frame so the user can see
         if palette is None:
-            log("calibration failed after retries — frames saved as calib_fail_*")
+            log("CALIBRATION FAILED after all attempts.")
+            log("The game assigned you a color that blends with the map/leaderboard,")
+            log("which breaks pixel vision. FIX: in the Custom Scenario editor pick a")
+            log("VIVID color for yourself (e.g. bright red/orange/blue), then set")
+            log("MANUAL_COLOR = \"[r, g, b]\" at the top of run_bot.py (or the env var).")
+            snapshot(page, "calib_fail")
             browser.close()
             sys.exit(1)
 
