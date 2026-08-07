@@ -415,53 +415,65 @@ def main() -> None:
         start = time.time()
         last_shot = time.time()
         last_ocr = time.time()
-        last_enemies = set()
+        last_enemy_colors: set = set()  # track COLORS, not labels (labels get reassigned)
         eliminated = 0
         log(f"BOT PLAYING for {PLAY_MINUTES} min...")
         while time.time() - start < PLAY_MINUTES * 60:
-            loop = ClickLoop(capture=lambda: grab(page), palette=palette, brain=planner,
-                             controls=controls, loop_cfg=LoopConfig(hz=DECISION_HZ),
-                             decision_interval_s=1.0 / DECISION_HZ)
-            stats = loop.run(duration_s=8, max_ticks=int(DECISION_HZ * 8))
-            for k, v in stats.snapshot()["actions"].items():
-                action_counts[k] = action_counts.get(k, 0) + v
-            img = grab(page)
             try:
-                from bot.vision import segment
-                st = segment(img, palette)
-                if st.self_blob:
-                    report["areas"].append({"t": round(time.time() - start, 1),
-                                            "area": st.self_blob.area})
-                    # enemy elimination detection: a palette enemy label vanishes
-                    now = {e.label for e in st.enemies}
-                    gone = last_enemies - now
-                    if gone:
-                        for g in gone:
-                            eliminated += 1
-                            log(f">>> ENEMY ELIMINATED: {g} (total {eliminated})")
-                            report["eliminations"].append({"t": round(time.time() - start, 1), "enemy": g})
-                    last_enemies = now
-                else:
-                    log(">>> WE WERE ELIMINATED")
-                    break
-            except Exception:
-                pass
-            # feed live balances (exact density + drained-enemy targeting) and
-            # rediscover enemy colors (they appear/grow over time)
-            if time.time() - last_ocr > 6:
-                feed_balances(page, planner, BOT_NAME, palette)
+                loop = ClickLoop(capture=lambda: grab(page), palette=palette, brain=planner,
+                                 controls=controls, loop_cfg=LoopConfig(hz=DECISION_HZ),
+                                 decision_interval_s=1.0 / DECISION_HZ)
+                stats = loop.run(duration_s=8, max_ticks=int(DECISION_HZ * 8))
+                for k, v in stats.snapshot()["actions"].items():
+                    action_counts[k] = action_counts.get(k, 0) + v
+                img = grab(page)
                 try:
-                    img2 = grab(page)
-                    en = discover_enemies(img2, tuple(palette.self_color.rgb))
-                    if en:
-                        palette = Palette(self_color=palette.self_color, enemy_colors=en,
-                                          tolerance=24.0, downscale=2)
+                    from bot.vision import segment
+                    st = segment(img, palette)
+                    if st.self_blob:
+                        report["areas"].append({"t": round(time.time() - start, 1),
+                                                "area": st.self_blob.area})
+                    else:
+                        log(">>> WE WERE ELIMINATED")
+                        break
                 except Exception:
                     pass
-                last_ocr = time.time()
-            if time.time() - last_shot > 5:
-                snapshot(page)
-                last_shot = time.time()
+                # feed live balances (exact density + drained-enemy targeting)
+                # and rediscover enemy colors (they appear/grow over time)
+                if time.time() - last_ocr > 6:
+                    try:
+                        feed_balances(page, planner, BOT_NAME, palette)
+                    except Exception as e:
+                        log(f"  balance OCR err: {e}")
+                    try:
+                        img2 = grab(page)
+                        en = discover_enemies(img2, tuple(palette.self_color.rgb))
+                        now_colors = {tuple(e.rgb) for e in en}
+                        # a color present before and gone now = that enemy was
+                        # eliminated (territory gone / turned neutral)
+                        if last_enemy_colors:
+                            for c in last_enemy_colors - now_colors:
+                                eliminated += 1
+                                log(f">>> ENEMY ELIMINATED {c} (total {eliminated})")
+                                report["eliminations"].append({"t": round(time.time() - start, 1), "color": list(c)})
+                        last_enemy_colors = now_colors
+                        if en:
+                            palette = Palette(self_color=palette.self_color, enemy_colors=en,
+                                              tolerance=24.0, downscale=2)
+                    except Exception as e:
+                        log(f"  rediscover err: {e}")
+                    last_ocr = time.time()
+                if time.time() - last_shot > 5:
+                    snapshot(page)
+                    last_shot = time.time()
+                # incremental report so a crash never loses the data
+                report["max_area"] = max([a["area"] for a in report["areas"]], default=0)
+                report["actions"] = dict(sorted(action_counts.items(), key=lambda kv: -kv[1]))
+                with open(os.path.join(OUT, "battle_report.json"), "w") as f:
+                    json.dump(report, f, indent=2)
+            except Exception as e:
+                log(f"loop error (continuing): {e}")
+                time.sleep(1)
 
         report["max_area"] = max([a["area"] for a in report["areas"]], default=0)
         report["actions"] = dict(sorted(action_counts.items(), key=lambda kv: -kv[1]))
