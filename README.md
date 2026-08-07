@@ -36,7 +36,15 @@ Map
 
 **Training run:** Kaggle GPU notebook `amerameryou/bot-train-nn` (T4 GPU, Internet on)
 **Pipeline:** collect (CPU-parallel, medium bots) → vision (GPU) → clone (GPU) → PPO (GPU, curriculum medium→hard) → HF upload
-**Status:** RUNNING — last checked 2026-08-07 ~14:20 UTC
+**Status:** RUNNING (v6) — last checked 2026-08-07 ~15:00 UTC
+
+**Fixes shipped in v6 (from the failed runs):**
+- P100 sm_60 support: notebook auto-installs torch 2.4.1+cu121 (last build with
+  P100 kernels); falls back to CPU if still broken (model is only 85k params)
+- Device-safe trainer: real CUDA sanity test at startup (torch.cuda.is_available
+  lies for P100), device-aware tensors (fixed the cuda-vs-cpu crash)
+- PPO shape bug fixed; bounded-memory rollouts (uint8 frames, act every 4 ticks)
+- Stage failures now STOP LOUDLY (never a silent COMPLETE)
 
 How to watch it yourself:
 1. https://www.kaggle.com/code/amerameryou/bot-train-nn
