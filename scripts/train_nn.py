@@ -316,11 +316,17 @@ def _rollout_worker(args):
 
 
 def _train_ppo_batch(net, opt, episodes, epochs=4, gamma=0.99, lam=0.95, clip=0.2):
+    """PPO update. FIX (v7): advantages are normalized ACROSS the whole batch,
+    not per-episode — per-episode normalization zeros the gradient whenever an
+    episode's rewards are near-constant (tiny growth ticks), which is exactly
+    the v5 'loss=0.000, nothing learned' failure. Rewards are scaled x10 so
+    per-tick growth is visible vs the survival tick."""
     net.train()
     tot_loss, nb = 0.0, 0
+    ep_adv, ep_ret = [], []
     for ep in episodes:
         T = len(ep["reward"])
-        # GAE
+        rw = np.array(ep["reward"], dtype=np.float32) * 10.0
         with torch.no_grad():
             xb = torch.tensor(ep["rgb"], dtype=torch.float32, device=DEVICE) / 255.0
             cxb = torch.tensor(ep["ctx"], device=DEVICE)
@@ -329,12 +335,21 @@ def _train_ppo_batch(net, opt, episodes, epochs=4, gamma=0.99, lam=0.95, clip=0.
         adv = np.zeros(T); gae = 0.0
         for t in reversed(range(T)):
             nxt = vals[t + 1] if t + 1 < T else (1.0 if ep["alive"] else 0.0)
-            delta = ep["reward"][t] + gamma * nxt - vals[t]
+            delta = rw[t] + gamma * nxt - vals[t]
             gae = delta + gamma * lam * gae
             adv[t] = gae
-        adv = (adv - adv.mean()) / (adv.std() + 1e-8)
-        ret = np.array([ep["reward"][t] + (vals[t + 1] if t + 1 < T else (1.0 if ep["alive"] else 0.0)) * gamma
+        ret = np.array([rw[t] + (vals[t + 1] if t + 1 < T else (1.0 if ep["alive"] else 0.0)) * gamma
                         for t in range(T)], dtype=np.float32)
+        ep_adv.append(adv); ep_ret.append(ret)
+    # GLOBAL advantage normalization across the whole batch
+    flat = np.concatenate(ep_adv) if ep_adv else np.zeros(1)
+    if flat.std() > 1e-6:
+        flat = (flat - flat.mean()) / (flat.std() + 1e-8)
+    off = 0
+    for adv in ep_adv:
+        adv[:] = flat[off:off + len(adv)]
+        off += len(adv)
+    for ep, adv, ret in zip(episodes, ep_adv, ep_ret):
         xb = torch.tensor(ep["rgb"], dtype=torch.float32, device=DEVICE) / 255.0
         cxb = torch.tensor(ep["ctx"], device=DEVICE)
         kb = torch.tensor(ep["kind"], device=DEVICE)
@@ -349,23 +364,16 @@ def _train_ppo_batch(net, opt, episodes, epochs=4, gamma=0.99, lam=0.95, clip=0.
             logpc = F.log_softmax(click, dim=1)
             lp = logpk.gather(1, kb.unsqueeze(1)).squeeze(1)
             nb_mask = (kb != 2).float()
-            # cell log-prob for ALL steps; zeroed out for bank actions
             cell_lp = logpc.gather(1, cb.unsqueeze(1)).squeeze(1)
             lp = lp + cell_lp * nb_mask
             ratio = torch.exp(lp - old_lp)
             pg = -torch.min(ratio * adv_t, torch.clamp(ratio, 1 - clip, 1 + clip) * adv_t).mean()
             vf = F.mse_loss(value, ret_t)
             ent = -torch.mean(logpk * logpk.exp())
-            loss = pg + 0.5 * vf - 0.01 * ent
+            loss = pg + 0.5 * vf - 0.05 * ent
             opt.zero_grad(); loss.backward(); opt.step()
             tot_loss += loss.item(); nb += 1
     return tot_loss / max(nb, 1)
-
-
-
-
-# ============================================================ real data ====
-REAL_NPZ = WEIGHTS / "real_vision.npz"
 
 
 def stage_real(net, epochs=10, bs=128, lr=5e-5):
@@ -524,7 +532,7 @@ def stage_ppo(net, rounds=None, episodes_per_worker=1, workers=None, lr=1e-4, ev
             wr, rank = evaluate(net, seeds=6, silent=True)
             if wr > best_wr:
                 best_wr = wr
-                save_model(net)
+                best_state = {k: v.detach().clone() for k, v in net.state_dict().items()}
             print(f"  ppo round {rnd}: loss={loss:.3f} alive={alive_rate:.2f} "
                   f"eval_wr={wr:.2f} rank={rank:.2f} (collect {collect_t:.0f}s, train {train_t:.0f}s, "
                   f"pool={len(pool_eps)})", flush=True)
@@ -546,6 +554,11 @@ def stage_ppo(net, rounds=None, episodes_per_worker=1, workers=None, lr=1e-4, ev
         else:
             print(f"  ppo round {rnd}: loss={loss:.3f} alive={alive_rate:.2f} "
                   f"(collect {collect_t:.0f}s, train {train_t:.0f}s)", flush=True)
+    # restore + save the BEST eval model (the unconditional save_model at the
+    # end used to overwrite it with the LAST round's net)
+    if best_wr > 0:
+        net.load_state_dict(best_state)
+        print(f"[ppo] restoring best eval model (wr={best_wr}) before save", flush=True)
     save_model(net)
     return net
 
