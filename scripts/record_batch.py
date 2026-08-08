@@ -50,7 +50,7 @@ def main():
     for g in range(1, args.games + 1):
         start = time.time()
         if args.zoom == "alt":
-            zl = ["1", "0", "2", "1", "0", "2"][(g - 1) % 6]  # variety: 1-6% blob in some matches
+            zl = ["2", "3", "2", "1", "2", "3"][(g - 1) % 6]  # zoom-in heavy: bigger self blob in frames
         else:
             zl = args.zoom
         env = dict(os.environ, ZOOM_LEVEL=zl, PLAY_MINUTES=str(args.minutes),
