@@ -39,44 +39,68 @@ SIZE = 64
 
 
 def classify_frame(rgb, self_rgb, enemy_rgbs):
-    """Return 5-class labels for an RGB uint8 frame."""
+    """Return 5-class labels for an RGB uint8 frame.
+
+    FIX (2026-08-08): the old version defaulted DARK pixels to UI and required
+    water b>=45 / land total>=60. The real game map is dark-themed (dark navy
+    ocean, dark land), so most map pixels were mislabeled UI — the NN could
+    never learn water/land (observed: water acc 0.00, all-UI collapse).
+    Now UI = KNOWN screen regions (leaderboard/banner/bottom bar) + bright
+    low-chroma text; the whole map is classified by color with NO darkness
+    floor and NEUTRAL as the final fallback.
+    """
     r = rgb[..., 0].astype(np.int16)
     g = rgb[..., 1].astype(np.int16)
     b = rgb[..., 2].astype(np.int16)
     H, W = r.shape
-    out = np.full((H, W), 4, dtype=np.int64)  # default UI
 
-    # water: blue-dominant (dark navy to bright blue)
-    water = (b > r + 10) & (b > g + 5) & (b >= 45)
-    out[water] = 0
-
-    # territory colors (me / enemy) within tolerance
-    me = np.ones((H, W), dtype=bool)
-    sr, sg, sb = self_rgb
-    me &= (np.abs(r - sr) <= 36) & (np.abs(g - sg) <= 36) & (np.abs(b - sb) <= 36)
-    out[me] = 2
-    for er, eg, eb in enemy_rgbs:
-        em = (np.abs(r - er) <= 36) & (np.abs(g - eg) <= 36) & (np.abs(b - eb) <= 36)
-        out[em] = 3
-
-    # land: green / beige / warm-gray / white-tile
+    # --- UI detection ---
+    # Opaque UI: bottom bar, top banner, far-left edge. The leaderboard panel
+    # is TRANSLUCENT (map shows through) — masking the whole rect would label
+    # map-through pixels as UI (pollutes ui with blue). Instead we catch
+    # leaderboard TEXT via the bright low-chroma rule below.
+    ui = np.zeros((H, W), dtype=bool)
+    ui[int(0.92 * H):, :] = True                         # bottom bar (opaque)
+    ui[: max(2, int(0.05 * H)), :] = True                # top banner (opaque)
+    ui[:, : max(2, int(0.015 * W))] = True               # far-left edge
+    # bright low-chroma pixels anywhere = text/icons (leaderboard rows, % labels)
     total = r + g + b
     mx = np.maximum(np.maximum(r, g), b)
     mn = np.minimum(np.minimum(r, g), b)
     chroma = mx - mn
-    green = (g > r + 5) & (g > b + 5) & (g > 30) & (total >= 60)
-    beige = (r > g + 4) & (g > b) & (r > 90) & (r < 245) & (g < 235)
-    warmgray = (chroma >= 10) & (r >= g) & (g >= b) & (r > 90)
-    light = (total >= 640) & (chroma < 16)
-    land = (green | beige | warmgray | light) & (out == 4)
-    out[land] = 1
+    ui |= (total >= 600) & (chroma < 24)
+
+    out = np.full((H, W), 1, dtype=np.int64)  # default neutral (MAP land/fallback)
+
+    # water: blue-dominant — NO brightness floor (dark navy ocean is water)
+    water = (b > r + 10) & (b > g + 5) & (~ui)
+    out[water] = 0
+
+    # territory colors (me / enemy) within tolerance — take priority over
+    # water, and only outside UI regions (UI swatches are not territory)
+    sr, sg, sb = self_rgb
+    me = (np.abs(r - sr) <= 36) & (np.abs(g - sg) <= 36) & (np.abs(b - sb) <= 36) & (~ui)
+    out[me] = 2
+    for er, eg, eb in enemy_rgbs:
+        em = (np.abs(r - er) <= 36) & (np.abs(g - eg) <= 36) & (np.abs(b - eb) <= 36) & (~ui)
+        out[em] = 3
+
+    # land: green / beige / warm-gray (any brightness) — stays neutral (1)
+    green = (g > r + 5) & (g > b + 5) & (g > 18) & (~ui)
+    beige = (r > g + 4) & (g > b) & (r > 40) & (r < 250) & (g < 240) & (~ui)
+    warmgray = (chroma >= 8) & (r >= g) & (g >= b) & (r > 40) & (~ui)
+    # (neutral is already 1 — these masks just keep it 1; nothing to do)
+
+    out[ui] = 4  # UI last — overwrites map classes inside UI regions
     return out
 
 
 def resize_pair(rgb, labels, size=SIZE):
-    rgb_s = np.array(Image.fromarray(rgb).resize((size, size), Image.BILINEAR))
-    lab_s = np.array(Image.fromarray(labels.astype(np.uint8)).resize((size, size), Image.NEAREST))
-    return rgb_s.astype(np.float32) / 255.0, lab_s.astype(np.int64)
+    """Resize frame + labels to SIZE. RGB stays uint8 (0..255) — float32
+    lists OOM the sandbox at >3k frames; the trainer converts /255 on load."""
+    rgb_s = np.array(Image.fromarray(rgb).resize((size, size), Image.BILINEAR)).astype(np.uint8)
+    lab_s = np.array(Image.fromarray(labels.astype(np.uint8)).resize((size, size), Image.NEAREST)).astype(np.uint8)
+    return rgb_s, lab_s
 
 
 def load_frame(path):
@@ -186,8 +210,9 @@ def main() -> int:
     out.parent.mkdir(parents=True, exist_ok=True)
     # store rgb as uint8 (0..255) and labels as uint8 — ~6x smaller npz;
     # train_nn.py converts back to float on load.
+    rgb_arr = data["rgb"] if data["rgb"].dtype == np.uint8 else (data["rgb"] * 255.0).astype(np.uint8)
     np.savez_compressed(out,
-                        rgb=(data["rgb"] * 255.0).astype(np.uint8),
+                        rgb=rgb_arr,
                         labels=data["labels"].astype(np.uint8),
                         kind=data["kind"] if data["kind"] is not None else np.zeros(0, dtype=np.int64),
                         cell=data["cell"] if data["cell"] is not None else np.zeros(0, dtype=np.int64),

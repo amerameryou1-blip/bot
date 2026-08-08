@@ -368,7 +368,7 @@ def _train_ppo_batch(net, opt, episodes, epochs=4, gamma=0.99, lam=0.95, clip=0.
 REAL_NPZ = WEIGHTS / "real_vision.npz"
 
 
-def stage_real(net, epochs=8, bs=128, lr=1e-4):
+def stage_real(net, epochs=10, bs=128, lr=5e-5):
     """Fine-tune vision (segmentation) + click head on REAL frames.
 
     Real data comes from scripts/label_real.py (recordings + screenshots):
@@ -409,15 +409,18 @@ def stage_real(net, epochs=8, bs=128, lr=1e-4):
         return {c: (correct[c] / total[c] if total[c] else float("nan")) for c in range(5)}
 
     opt = torch.optim.Adam(net.parameters(), lr=lr)
-    # inverse-frequency class weights from the ACTUAL label distribution
-    # (capped at 25x) — me/enemy are rare in real frames; fixed [1,1,2.5,2.5,1]
-    # lets the model collapse to the majority class (UI).
+    # sqrt-inverse-frequency class weights (standard for imbalanced seg):
+    # w_c = 1/sqrt(freq_c), then scaled so the MAX weight is 1 and floored at
+    # 0.05. Less extreme than 1/freq — keeps water/neutral/ui learnable while
+    # still upweighting the rare me/enemy classes.
     dist = np.bincount(d["labels"].ravel(), minlength=5).astype(np.float64)
     dist = np.clip(dist, 1, None)
-    inv = dist.sum() / dist
-    inv = np.clip(inv / inv.max(), 0.2, 25.0)
+    freq = dist / dist.sum()
+    inv = 1.0 / np.sqrt(freq)
+    inv = inv / inv.max()
+    inv = np.clip(inv, 0.05, 1.0)
     class_w = torch.tensor(inv, dtype=torch.float32, device=DEVICE)
-    print(f"[real] inverse-freq class weights: {[round(float(w), 2) for w in inv]}", flush=True)
+    print(f"[real] sqrt-inverse-freq class weights: {[round(float(w), 3) for w in inv]}", flush=True)
     for ep in range(epochs):
         net.train()
         tot, nb = 0.0, 0
