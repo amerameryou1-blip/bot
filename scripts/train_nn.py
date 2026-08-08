@@ -421,26 +421,14 @@ def stage_real(net, epochs=12, bs=128, lr=3e-5):
         return {c: (correct[c] / total[c] if total[c] else float("nan")) for c in range(5)}
 
     opt = torch.optim.Adam(net.parameters(), lr=lr)
-<<<<<<< HEAD
-    # sqrt-inverse-frequency class weights (standard for imbalanced seg):
-    # w_c = 1/sqrt(freq_c), then scaled so the MAX weight is 1 and floored at
-    # 0.05. Less extreme than 1/freq — keeps water/neutral/ui learnable while
-    # still upweighting the rare me/enemy classes.
-=======
     # v14 class weights: sqrt-inverse-frequency, CAPPED [0.2, 0.8].
     # v13 ran the old 1/freq weights [0.2,0.2,1.0,0.2,0.2] — me=1.0 starved
     # water/enemy/ui at 0.2 -> me-overfit, water/enemy never learned.
->>>>>>> 0660a47 (v14 real stage: FIX uint8->float bug (d[rgb] 0-255 vs sim 0-1 wrecked transfer); capped sqrt-inverse weights [0.2,0.8]; cosine LR 3e-5->3e-6; sim-mixing every 2nd batch; rare-class frame oversampling; 12 epochs)
     dist = np.bincount(d["labels"].ravel(), minlength=5).astype(np.float64)
     dist = np.clip(dist, 1, None)
     freq = dist / dist.sum()
     inv = 1.0 / np.sqrt(freq)
     inv = inv / inv.max()
-<<<<<<< HEAD
-    inv = np.clip(inv, 0.05, 1.0)
-    class_w = torch.tensor(inv, dtype=torch.float32, device=DEVICE)
-    print(f"[real] sqrt-inverse-freq class weights: {[round(float(w), 3) for w in inv]}", flush=True)
-=======
     inv = np.clip(inv, 0.2, 0.8)
     class_w = torch.tensor(inv, dtype=torch.float32, device=DEVICE)
     print(f"[real] sqrt-inverse-freq class weights (capped 0.2-0.8): {[round(float(w), 3) for w in inv]}", flush=True)
@@ -464,7 +452,6 @@ def stage_real(net, epochs=12, bs=128, lr=3e-5):
 
     import math
     lr_min = lr * 0.1
->>>>>>> 0660a47 (v14 real stage: FIX uint8->float bug (d[rgb] 0-255 vs sim 0-1 wrecked transfer); capped sqrt-inverse weights [0.2,0.8]; cosine LR 3e-5->3e-6; sim-mixing every 2nd batch; rare-class frame oversampling; 12 epochs)
     for ep in range(epochs):
         lr_t = lr_min + 0.5 * (lr - lr_min) * (1 + math.cos(math.pi * ep / max(epochs, 1)))
         opt.param_groups[0]["lr"] = lr_t
