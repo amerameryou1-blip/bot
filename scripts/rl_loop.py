@@ -71,8 +71,19 @@ def best_meta():
     return {"wr": -1.0, "rank": 99.0, "ts": 0, "source": "none"}
 
 
+def _try_load(net, path):
+    """Shape-safe: returns True only if the checkpoint fits this net."""
+    try:
+        net.load_state_dict(torch.load(path, map_location=T.DEVICE))
+        return True
+    except Exception as e:
+        log(f"ckpt {Path(path).name} mismatch ({str(e)[:50]}) — skipped")
+        return False
+
+
 def load_latest_net():
-    """Newest checkpoint: local best.pt -> HF rl/best.json+ckpt -> v14 seed."""
+    """Newest checkpoint: HF rl/best.json+ckpt -> local best.pt -> model.pt.
+    All loads are shape-safe (old 85k brains can never crash the 2M net)."""
     api, tok = _hf_api()
     if api:
         try:
@@ -83,18 +94,17 @@ def load_latest_net():
             if remote.get("ts", 0) > local.get("ts", 0):
                 p = api.hf_hub_download(repo_id=HF_DATASET, repo_type="dataset",
                                         filename=f"rl/ckpt_{remote['ts']}.pt", token=tok)
-                log(f"pulled newer checkpoint ts={remote['ts']} wr={remote.get('wr')}")
                 net = T.make_net().to(T.DEVICE)
-                net.load_state_dict(torch.load(p, map_location=T.DEVICE))
-                return net, remote
+                if _try_load(net, p):
+                    log(f"pulled newer checkpoint ts={remote['ts']} "
+                        f"wr={remote.get('wr')}")
+                    return net, remote
         except Exception as e:
             log(f"checkpoint pull skipped ({str(e)[:60]})")
-    if BEST_PT.exists():
-        net = T.make_net().to(T.DEVICE)
-        net.load_state_dict(torch.load(BEST_PT, map_location=T.DEVICE))
-        return net, best_meta()
     net = T.make_net().to(T.DEVICE)
-    T.load_model(net)  # weights/nn/model.pt (v14 seed checkpoint)
+    if BEST_PT.exists() and _try_load(net, BEST_PT):
+        return net, best_meta()
+    T.load_model(net)  # weights/nn/model.pt (shape-safe inside)
     return net, best_meta()
 
 
@@ -202,9 +212,14 @@ def mode_worker(hours, skill, n_bots):
     while time.time() < t_end:
         net, meta = load_latest_net()
         net.eval()
+        # 2026 data-gen rule (arXiv 2603.24202): ENVIRONMENT DIVERSITY beats
+        # scale; medium difficulty is the sweet spot (easy->overfit,
+        # hard->sparse rewards). Randomize lobby per shard.
+        sk = str(np.random.choice(["medium"] * 3 + ["easy", "hard"]))
+        nb = int(np.random.choice([6, 8, 10, 12]))
         episodes, seed0 = [], int(time.time()) % 100000
         for s in range(ep_per_shard):
-            episodes += T._rollout_one(net, seed0 + s * 7 + 1, skill, 1, n_bots=n_bots)
+            episodes += T._rollout_one(net, seed0 + s * 7 + 1, sk, 1, n_bots=nb)
         if not episodes:
             log("no episodes collected — sleeping")
             time.sleep(sleep_s)
@@ -213,7 +228,7 @@ def mode_worker(hours, skill, n_bots):
         for ep in episodes:
             if ep["alive"]:
                 wins += 1  # note: alive, not last-survivor (workers are cheap)
-        path = SHARDS / f"shard_rl_{int(time.time())}_{os.getpid()}_{shard_i}.npz"
+        path = SHARDS / f"shard_rl_{int(time.time())}_{os.getpid()}_{shard_i}_{sk}_{nb}.npz"
         np.savez_compressed(path, **pack_episodes(episodes, seed0))
         shard_i += 1
         log(f"worker shard {path.name}: {len(episodes)} episodes "
@@ -293,7 +308,8 @@ def mode_trainer(hours):
         net, _ = load_latest_net()
         opt = T.make_optimizer(net)   # Muon+AdamW hybrid, NaN-watchdogged
         loss = T._train_ppo_batch(net, opt, episodes, epochs=epochs)
-        wr, rank = T.evaluate(net, seeds=6, silent=True)
+        wr, rank = T.evaluate(net, seeds=int(os.environ.get("EVAL_SEEDS", "4")),
+                              silent=True)
         msg = (f"trainer iter: shards={len(pending)} episodes={len(episodes)} "
                f"loss={loss:.3f} | LAST-SURVIVOR wr={wr:.2f} rank={rank:.2f} "
                f"(best {best['wr']:.2f})")
