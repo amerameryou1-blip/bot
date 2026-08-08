@@ -182,6 +182,22 @@ class TerritoryNetSmall(nn.Module):
             return seg, local, click, kind_logits, pct, value
         return click, kind_logits, pct, value
 
+    def seg_probs(self, rgb):
+        seg, *_ = self.forward(rgb, return_all=True)
+        return F.softmax(seg, dim=1)
+
+    def act(self, rgb, ctx=None, greedy=True):
+        self.eval()
+        with torch.no_grad():
+            seg, local, click, kind, pct, value = self.forward(rgb, ctx, return_all=True)
+            if greedy:
+                cell = int(click[0].argmax())
+                kind_i = int(kind[0].argmax())
+            else:
+                cell = int(torch.multinomial(F.softmax(click[0], dim=-1), 1))
+                kind_i = int(torch.multinomial(F.softmax(kind[0], dim=-1), 1))
+            return kind_i, cell, float(pct[0]), float(value[0])
+
 
 def count_params(net: nn.Module) -> int:
     return sum(p.numel() for p in net.parameters())

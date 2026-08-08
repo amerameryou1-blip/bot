@@ -36,34 +36,33 @@ UI_CLASS = 4
 
 
 def load_model(path=None):
-    """Load TerritoryNet weights; try local, then Hugging Face (public repo)."""
+    """Load the best available brain, shape-safe:
+    2M distilled/rl checkpoint -> 2M model.pt -> trained 85k teacher."""
     if not _HAS_TORCH:
         return None
-    from nn.model import TerritoryNet
-    net = TerritoryNet(grid=GRID, context_dim=3)
+    from nn.model import TerritoryNet, TerritoryNetSmall
     candidates = []
     if path:
         candidates.append(Path(path))
+    candidates.append(REPO / "weights" / "nn" / "rl" / "best.pt")
     candidates.append(REPO / "weights" / "nn" / "model.pt")
-    candidates.append(REPO / "weights" / "nn" / "model.safetensors")
     for c in candidates:
         if c.exists():
-            if c.suffix == ".safetensors":
-                from safetensors.torch import load_file
-                state = load_file(str(c))
-            else:
-                state = torch.load(c, map_location="cpu")
-            net.load_state_dict(state)
-            return net
-    # HF fallback (public repo, no auth)
-    try:
-        from huggingface_hub import hf_hub_download
-        w = hf_hub_download("amer224/territorial-bot-nn", "model.safetensors")
-        from safetensors.torch import load_file
-        net.load_state_dict(load_file(w))
-        return net
-    except Exception:
-        return None
+            try:
+                net = TerritoryNet(grid=GRID, context_dim=3)
+                net.load_state_dict(torch.load(c, map_location="cpu"))
+                return net
+            except Exception:
+                continue
+    tp = REPO / "weights" / "nn" / "teacher.pt"
+    if tp.exists():
+        try:
+            t = TerritoryNetSmall(grid=GRID, context_dim=3)
+            t.load_state_dict(torch.load(tp, map_location="cpu"))
+            return t
+        except Exception:
+            pass
+    return None
 
 
 class NeuralBrain:

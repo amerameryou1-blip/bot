@@ -281,6 +281,17 @@ def stage_seed(net, epochs=2, bs=256):
             opt.zero_grad(); loss.backward(); opt.step()
             tot += loss.item(); nb += 1
         print(f"  seed epoch {ep + 1}: loss={tot / max(nb, 1):.4f}", flush=True)
+    # publish the distilled 2M brain where the RL loop picks it up, so the
+    # loop starts from "teacher knowledge", not random weights
+    try:
+        rl_dir = WEIGHTS / "rl"
+        rl_dir.mkdir(parents=True, exist_ok=True)
+        torch.save(net.state_dict(), rl_dir / "best.pt")
+        json.dump({"ts": int(time.time()), "wr": 0.0, "rank": 99.0,
+                   "source": "seed-distill"}, open(rl_dir / "best.json", "w"))
+        print("[seed] published distilled brain to rl/best.pt", flush=True)
+    except Exception as e:
+        print(f"[seed] publish failed: {str(e)[:60]}", flush=True)
     return net
 
 
