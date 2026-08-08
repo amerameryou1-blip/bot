@@ -34,6 +34,8 @@ def notebook_to_script(nb: dict) -> str:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--rounds", default=None, help="PPO_ROUNDS override")
+    ap.add_argument("--push-only", action="store_true",
+                    help="push the kernel and exit (no monitoring)")
     args = ap.parse_args()
 
     hf = os.environ.get("HF_TOKEN", "").strip()
@@ -69,8 +71,10 @@ def main():
     print("script compiles OK,", len(script.splitlines()), "lines")
 
     meta = {
-        "id": "amerameryou/bot-train-nn",
-        "title": "bot-train-nn",
+        # NEW slug: Kaggle kernels remember their GPU setting at creation;
+        # bot-train-nn was born GPU, so a CPU re-push must be a fresh kernel.
+        "id": "amerameryou/bot-train-cpu",
+        "title": "bot-train-cpu",
         "code_file": "kaggle_train_nn.py",
         "language": "python",
         "kernel_type": "script",
@@ -88,7 +92,9 @@ def main():
     print(r.stderr.strip()[-400:] if r.returncode else "")
     if r.returncode != 0:
         sys.exit(1)
-    print("PUSHED (script kernel). Monitoring amerameryou/bot-train-nn...")
+    print("PUSHED (script kernel). Monitoring amerameryou/bot-train-cpu...")
+    if args.push_only:
+        sys.exit(0)
     for i in range(180):
         s = subprocess.run(["kaggle", "kernels", "status", "amerameryou/bot-train-nn"],
                            capture_output=True, text=True).stdout
