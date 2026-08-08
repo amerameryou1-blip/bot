@@ -170,17 +170,24 @@ def unpack_episodes(shard):
     return eps
 
 
-def push_shard(path: Path):
+def push_shards_batch(folder: Path):
+    """ONE commit for all pending local shards (HF caps commits at
+    128/h — per-shard commits were saturating the account budget)."""
+    files = sorted(folder.glob("shard_rl_*.npz"))
+    if not files:
+        return
     api, tok = _hf_api()
     if not api:
         return
     try:
-        api.upload_file(path_or_fileobj=str(path),
-                        path_in_repo=f"rl/shards/{path.name}",
-                        repo_id=HF_DATASET, repo_type="dataset", token=tok)
-        log(f"shard {path.name} -> HF")
+        api.upload_folder(folder_path=str(folder), path_in_repo="rl/shards",
+                          repo_id=HF_DATASET, repo_type="dataset", token=tok,
+                          ignore_patterns="*.partial")
+        log(f"{len(files)} shards -> HF (1 commit)")
+        for f in files:
+            f.unlink()
     except Exception as e:
-        log(f"shard upload failed ({str(e)[:60]}) — kept local")
+        log(f"batch upload failed ({str(e)[:60]}) — kept local")
 
 
 # ------------------------------------------------------------------ worker ---
@@ -188,7 +195,10 @@ def mode_worker(hours, skill, n_bots):
     t_end = time.time() + hours * 3600
     ep_per_shard = int(os.environ.get("EP_PER_SHARD", "8"))
     sleep_s = float(os.environ.get("SHARD_SLEEP_S", "20"))
+    flush_s = float(os.environ.get("FLUSH_S", "1200"))  # 1 HF commit / 20 min
+    last_flush = time.time()
     shard_i = 0
+    over_cap = False
     while time.time() < t_end:
         net, meta = load_latest_net()
         net.eval()
@@ -209,8 +219,28 @@ def mode_worker(hours, skill, n_bots):
         log(f"worker shard {path.name}: {len(episodes)} episodes "
             f"({sum(e['reward'].size for e in episodes)} steps) vs ckpt "
             f"wr={meta.get('wr', -1):.2f} alive={wins}/{len(episodes)}")
-        push_shard(path)
+        # storage hygiene: stop uploading when the HF queue is too big
+        # (trainer deletes consumed shards; cap bounds the backlog)
+        if shard_i % 10 == 1:
+            api0, tok0 = _hf_api()
+            if api0:
+                try:
+                    n = sum(1 for _ in api0.list_repo_tree(
+                        HF_DATASET, "rl/shards", repo_type="dataset", token=tok0))
+                    over_cap = n > int(os.environ.get("HF_SHARD_CAP", "800"))
+                    if over_cap:
+                        log(f"HF shard backlog {n} > cap — skipping uploads")
+                except Exception:
+                    pass
+        if over_cap:
+            loc = sorted(SHARDS.glob("shard_rl_*.npz"))
+            for f in loc[:-30]:
+                f.unlink()  # backlog capped: drop oldest local experience
+        elif time.time() - last_flush > flush_s:
+            push_shards_batch(SHARDS)   # 1 HF commit per flush
+            last_flush = time.time()
         time.sleep(sleep_s)
+    push_shards_batch(SHARDS)
     log("worker hours exhausted — exiting")
 
 
@@ -276,6 +306,19 @@ def mode_trainer(hours):
         log(msg)
         for p in pending:
             p.rename(DONE / p.name)
+        # storage hygiene (user 2026-08-08): experience is now IN the weights —
+        # delete consumed shards from HF in ONE commit so the repo stays lean
+        try:
+            api_del, tok_del = _hf_api()
+            if api_del:
+                from huggingface_hub import DeleteFiles
+                api_del.create_commit(
+                    repo_id=HF_DATASET, repo_type="dataset", token=tok_del,
+                    commit_message="consume shards",
+                    operations=[DeleteFiles(path_in_repo=f"rl/shards/{p.name}")
+                                for p in pending])
+        except Exception as e:
+            log(f"shard delete commit failed ({str(e)[:60]})")
     log("trainer hours exhausted — exiting")
 
 
