@@ -29,6 +29,22 @@ def status(slug: str) -> str:
     return out.strip()[:60]
 
 
+def push_trainer_best_effort():
+    """Keep trying to push the newest trainer; rejected while 5 CPU sessions
+    run, goes through the instant a slot frees (v15 finish / worker end)."""
+    try:
+        import launch_loop_kernels as L
+        hf = os.environ.get("HF_TOKEN", "").strip()
+        if not hf:
+            return
+        code = (L.TRAINER_BOOT.replace("@@HF@@", hf).replace("@@REPO@@", L.GH_REPO_URL)
+                .replace("@@HOURS@@", "9.0").replace("@@DELAY@@", "1"))
+        out = L.push_kernel("rl-loop-trainer-cpu", "rl-loop-trainer-cpu", code)
+        print(f"trainer push: {out[:100]}", flush=True)
+    except Exception as e:
+        print(f"trainer push err: {e}", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--relaunch", action="store_true",
@@ -40,6 +56,7 @@ def main():
         print(f"{k:14s} {s}", flush=True)
         if not any(x in s for x in ALIVE):
             dead.append(k)
+    push_trainer_best_effort()
     if a.relaunch and dead:
         # a CPU slot just freed -> ferry any recordings zips waiting on GH
         try:
