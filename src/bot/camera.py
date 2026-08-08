@@ -20,12 +20,20 @@ direction. v2 searches BOTH directions, zooming toward our blob's position.
 """
 from __future__ import annotations
 
+import io
 import os
 import time
 
 import numpy as np
 
 from bot.calibration import _ocr_words, blob, find_name_box
+
+
+def _grab_rgb(page) -> np.ndarray:
+    """page.screenshot() returns PNG BYTES — decode properly (vision-session
+    bug: np.array(bytes) made every live leaderboard read silently garbage)."""
+    from PIL import Image
+    return np.array(Image.open(io.BytesIO(page.screenshot())).convert("RGB"))
 
 _WHEEL_OUT = 800      # deltaY>0 -> fi=0.5 -> 2x zoom OUT
 _WHEEL_IN = -800      # deltaY<0 -> fi=2.0 -> 2x zoom IN
@@ -211,11 +219,12 @@ def click_highlighted_row(page) -> bool:
     (green in every observed match, whatever our territory color is).
     Click it — zero OCR, zero name matching."""
     try:
-        img = np.array(page.screenshot())
+        img = _grab_rgb(page)
         reg = img[60:310, 10:270].astype(int)
         r, g, b = reg[..., 0], reg[..., 1], reg[..., 2]
         m = (g > 70) & (g - r > 30) & (g - b > 30)
         rows = m.any(axis=1)
+        print(f"[rec-dbg] mask={int(m.sum())} rows={int(rows.sum())}", flush=True)
         if rows.sum() < 6:
             return False
         # contiguous runs; a real row band is 10-40 px tall
@@ -228,6 +237,9 @@ def click_highlighted_row(page) -> bool:
         runs.append((start, ys[-1]))
         runs = [(a, b2) for a, b2 in runs if 8 <= b2 - a <= 45]
         if not runs:
+            from PIL import Image as _I
+            _I.fromarray(img.astype("uint8")).save(
+                os.path.join(os.environ.get("DBG_DIR", "bot_output"), "rec_dbg.png"))
             return False
         a, b2 = max(runs, key=lambda t: t[1] - t[0])
         cy = 60 + int((a + b2) / 2)
@@ -243,7 +255,7 @@ def recenter_via_leaderboard(page, bot_name: str, retries: int = 2) -> bool:
     Name-OCR first (with retries), then the OCR-free highlighted-row click."""
     for _ in range(retries):
         try:
-            img = np.array(page.screenshot())
+            img = _grab_rgb(page)
             words = _ocr_words(img)
             if words:
                 box, ratio = find_name_box(words, bot_name)

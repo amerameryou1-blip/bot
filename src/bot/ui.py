@@ -62,9 +62,11 @@ def find_play(page) -> dict | None:
 def is_in_lobby(page) -> bool:
     """Top-left region OCR shows 'Lobby:'/'MP:' -> we are in the multiplayer lobby."""
     try:
+        import io
         import numpy as np
+        from PIL import Image
         from bot.calibration import _ocr_words
-        img = np.array(page.screenshot())
+        img = np.array(Image.open(io.BytesIO(page.screenshot())).convert("RGB"))
         words = _ocr_words(img)
         joined = " ".join(w[0] for w in words)
         return ("Lobby:" in joined) or ("MP:" in joined and "Player Count" in joined)
