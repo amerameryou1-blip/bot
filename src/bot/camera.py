@@ -78,14 +78,25 @@ def _lighten(c, t=0.55):
 
 
 def _self_blob(img: np.ndarray, self_rgb, tol: int = 24):
-    a = blob(img, list(self_rgb), tol=tol, min_area=10)
-    b = blob(img, _lighten(self_rgb), tol=28, min_area=10)
-    if a and b:
-        m = a["mask"] | b["mask"]
-        c = np.argwhere(m)
-        return {"area": len(c), "cy": float(c[:, 0].mean()),
-                "cx": float(c[:, 1].mean()), "mask": m}
-    return b or a
+    """Union of the sampled shade + its lighter/darker family (the game
+    renders own-territory interiors/edges in different shades; the exact
+    split is inconsistent — cover the family instead of theorizing)."""
+    shades = [list(self_rgb), _lighten(self_rgb), [int(v * 0.65) for v in self_rgb]]
+    masks, best = [], None
+    for c in shades:
+        b = blob(img, c, tol=tol, min_area=10)
+        if b:
+            masks.append(b["mask"])
+            if best is None or b["area"] > best["area"]:
+                best = b
+    if not masks:
+        return None
+    m = masks[0]
+    for mm in masks[1:]:
+        m = m | mm
+    c = np.argwhere(m)
+    return {"area": len(c), "cy": float(c[:, 0].mean()),
+            "cx": float(c[:, 1].mean()), "mask": m}
 
 
 def self_blob_frac(img: np.ndarray, self_rgb, tol: int = 24) -> float:
@@ -195,22 +206,55 @@ def verify_view(img: np.ndarray, self_rgb, tol: int = 24) -> dict:
     }
 
 
-def recenter_via_leaderboard(page, bot_name: str) -> bool:
-    """Click our own row in the leaderboard to recenter the camera on us."""
+def click_highlighted_row(page) -> bool:
+    """Our leaderboard row is the ONLY one with a vivid highlight band
+    (green in every observed match, whatever our territory color is).
+    Click it — zero OCR, zero name matching."""
     try:
         img = np.array(page.screenshot())
-        words = _ocr_words(img)
-        if not words:
+        reg = img[60:310, 10:270].astype(int)
+        r, g, b = reg[..., 0], reg[..., 1], reg[..., 2]
+        m = (g > 70) & (g - r > 30) & (g - b > 30)
+        rows = m.any(axis=1)
+        if rows.sum() < 6:
             return False
-        box, ratio = find_name_box(words, bot_name)
-        if box is None:
+        # contiguous runs; a real row band is 10-40 px tall
+        ys = np.flatnonzero(rows)
+        runs, start = [], ys[0]
+        for a, b2 in zip(ys, ys[1:]):
+            if b2 - a > 2:
+                runs.append((start, a))
+                start = b2
+        runs.append((start, ys[-1]))
+        runs = [(a, b2) for a, b2 in runs if 8 <= b2 - a <= 45]
+        if not runs:
             return False
-        x, y = box[1] + box[3] // 2, box[2] + box[4] // 2
-        page.mouse.click(x, y)
+        a, b2 = max(runs, key=lambda t: t[1] - t[0])
+        cy = 60 + int((a + b2) / 2)
+        page.mouse.click(140, cy)
         time.sleep(0.6)
         return True
     except Exception:
         return False
+
+
+def recenter_via_leaderboard(page, bot_name: str, retries: int = 2) -> bool:
+    """Click our own row in the leaderboard to recenter the camera on us.
+    Name-OCR first (with retries), then the OCR-free highlighted-row click."""
+    for _ in range(retries):
+        try:
+            img = np.array(page.screenshot())
+            words = _ocr_words(img)
+            if words:
+                box, ratio = find_name_box(words, bot_name)
+                if box is not None:
+                    x, y = box[1] + box[3] // 2, box[2] + box[4] // 2
+                    page.mouse.click(x, y)
+                    time.sleep(0.6)
+                    return True
+        except Exception:
+            pass
+    return click_highlighted_row(page)
 
 
 def fix_camera(page, grab, self_rgb, bot_name: str | None = None,

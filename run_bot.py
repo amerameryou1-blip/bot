@@ -134,8 +134,12 @@ def discover_enemies(img, self_rgb, max_enemies=8):
     for c in saturated_colors(img, max_colors=40):
         if tuple(c) == tuple(self_rgb):
             continue
-        if sum(abs(int(a) - int(b)) for a, b in zip(c, self_rgb)) < 60:
-            continue  # antialiased shade of our own territory (v3.1)
+        # skip our whole shade family (lighter interior / darker edge)
+        if min(sum(abs(int(a) - int(b)) for a, b in zip(c, f))
+               for f in (list(self_rgb),
+                         [int(v + (255 - v) * 0.55) for v in self_rgb],
+                         [int(v * 0.65) for v in self_rgb])) < 60:
+            continue
         if any(np.all(np.abs(np.array(c) - np.array(d)) <= 24) for d in dom):
             continue  # terrain/UI
         b = blob(img, c, tol=20, min_area=15)
@@ -277,14 +281,56 @@ def _crown_yellow(c) -> bool:
     return abs(r - 240) < 45 and abs(g - 224) < 45 and abs(b - 112) < 60
 
 
-def detect_own_color(page, watch_s=18) -> Palette | None:
-    """Spawn by double-click, then SAMPLE our territory color AT THE SPAWN
-    POINTS — causal ground truth.
+def _frame_dominants(img, n=4):
+    px = img[::4, ::4].reshape(-1, 3).astype(int)
+    q = px // 24 * 24
+    return [c for c, _ in Counter(map(tuple, q)).most_common(n)]
 
-    Verified by eye (2026-08-08): the leaderboard swatch is polluted by the
-    green row highlight, and the yellow crown + black name label sit ON TOP of
-    our territory (old 'spawn blob' diff was latching onto the CROWN or sand).
-    Sampling the pixels under our click points after claiming is exact.
+
+def _center_self_colors(img):
+    """After a leaderboard recenter, OUR territory sits at screen centre.
+    Return (main shade, partner shades) — no tint theory, just the pixels at
+    the one spot the game guarantees is us. Excludes label text, white, the
+    crown icon and map-wide dominants (neutral land / water)."""
+    H, W, _ = img.shape
+    patch = img[max(0, H // 2 - 90):H // 2 + 90, max(0, W // 2 - 120):W // 2 + 120]
+    dom = _frame_dominants(img)
+    px = patch.reshape(-1, 3).astype(int)
+    q = px // 24 * 24
+    cands = []
+    for c, n in Counter(map(tuple, q)).most_common(14):
+        if n < 40:
+            continue
+        if max(c) < 90 or min(c) > 200:
+            continue
+        if _crown_yellow(c):
+            continue
+        if any(all(abs(a - b) <= 24 for a, b in zip(c, d)) for d in dom):
+            continue
+        cands.append(list(c))
+    if not cands:
+        return None, []
+    return cands[0], cands[1:3]
+
+
+def _palette_from(main, partners):
+    al = [list(c) for c in partners]
+    al.append([int(v + (255 - v) * 0.55) for v in main])  # lighter shade
+    al.append([int(v * 0.65) for v in main])             # darker shade
+    return Palette(self_color=PlayerColor("me", *main),
+                   self_aliases=[PlayerColor(f"me_a{i}", *c)
+                                 for i, c in enumerate(al)],
+                   tolerance=24.0, downscale=2)
+
+
+def detect_own_color(page, watch_s=18) -> Palette | None:
+    """Identify OUR territory color without any tint assumptions:
+
+    1. spawn by double-click
+    2. click our NAME in the leaderboard (always visible — user's trick) ->
+       the game recenters the camera on our territory
+    3. sample the centre pixels = us (main shade + partner shades)
+    Fallbacks: sample at spawn clicks, then watch for a new blob.
     """
     img = grab(page)
     spots = land_spots(img, n=4)
@@ -292,16 +338,32 @@ def detect_own_color(page, watch_s=18) -> Palette | None:
         page.mouse.dblclick(spot[0], spot[1])
         time.sleep(0.8)
     time.sleep(1.0)
+
+    from bot.camera import recenter_via_leaderboard
+    rec_ok = recenter_via_leaderboard(page, BOT_NAME)
+    log(f"[color] leaderboard recenter click: {rec_ok}")
+    if rec_ok:
+        time.sleep(0.9)
+        img = grab(page)
+        main, partners = _center_self_colors(img)
+        log(f"[color] centre sample: main={main} partners={partners}")
+        if main is not None:
+            log(f"SPAWN DETECTED (recenter+centre): main={main} "
+                f"partners={partners}")
+            return _palette_from(main, partners)
+        log("[color] recenter worked but centre sample empty — fallbacks")
+
+    # fallback 1: sample at the spawn click points
     img = grab(page)
 
     def ok_color(c):
-        if max(c) < 90:                   # black label / shadow
+        if max(c) < 90:
             return False
-        if _crown_yellow(c):              # the crown icon
+        if _crown_yellow(c):
             return False
-        if c[2] > c[0] + 30 and c[2] > 90:  # water
+        if c[2] > c[0] + 30 and c[2] > 90:
             return False
-        if max(c) - min(c) < 25:          # gray terrain / UI
+        if max(c) - min(c) < 25:
             return False
         return True
 
@@ -312,14 +374,11 @@ def detect_own_color(page, watch_s=18) -> Palette | None:
         if ok_color(med):
             good.append(med)
     if good:
-        c = max(set(good), key=good.count)
-        log(f"SPAWN DETECTED (sampled at clicks): color={list(c)}")
-        lite = [int(v + (255 - v) * 0.55) for v in c]
-        return Palette(self_color=PlayerColor("me", *c),
-                       self_aliases=[PlayerColor("me_lite", *lite)],
-                       tolerance=20.0, downscale=2)
+        c = list(max(set(good), key=good.count))
+        log(f"SPAWN DETECTED (sampled at clicks): color={c}")
+        return _palette_from(c, [])
 
-    # fallback: watch for a small territory anywhere (crown excluded)
+    # fallback 2: watch for a small territory anywhere (crown excluded)
     deadline = time.time() + watch_s
     while time.time() < deadline:
         time.sleep(0.7)
@@ -329,10 +388,7 @@ def detect_own_color(page, watch_s=18) -> Palette | None:
         if cands:
             c, area = cands[0]
             log(f"SPAWN DETECTED (watch): color={c} blob={area}")
-            lite = [int(v + (255 - v) * 0.55) for v in c]
-            return Palette(self_color=PlayerColor("me", *c),
-                           self_aliases=[PlayerColor("me_lite", *lite)],
-                           tolerance=20.0, downscale=2)
+            return _palette_from(list(c), [])
     return None
 
 
