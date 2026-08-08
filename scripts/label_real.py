@@ -107,6 +107,11 @@ def load_frame(path):
     return np.asarray(Image.open(path).convert("RGB"))
 
 
+# session ids (or prefixes) curated out by the vision agent after looking at
+# the frames: broken-camera or modal-frozen matches pollute click labels.
+SKIP_SESSIONS: set = set()
+
+
 def process_recordings(rec_root: Path) -> dict:
     rgb_list, lab_list, kind_list, cell_list, pct_list = [], [], [], [], []
     sessions = sorted(d for d in rec_root.iterdir() if d.is_dir())
@@ -119,6 +124,10 @@ def process_recordings(rec_root: Path) -> dict:
             print(f"  skip {sess.name}: no meta.json")
             continue
         meta = json.loads(meta_path.read_text())
+        if sess.name in SKIP_SESSIONS or any(sess.name.startswith(s)
+                                             for s in SKIP_SESSIONS if s):
+            print(f"  skip {sess.name}: curated out (bad camera / modal freeze)")
+            continue
         if not meta.get("self_color") or not meta.get("enemy_colors"):
             print(f"  skip {sess.name}: no self/enemy colors in meta")
             continue
@@ -191,7 +200,11 @@ def main() -> int:
     ap.add_argument("--out", type=str, required=True)
     ap.add_argument("--save-anyway", action="store_true",
                     help="save even if no click labels (vision-only dataset)")
+    ap.add_argument("--skip", type=str, default="",
+                    help="comma-separated session id prefixes to exclude")
     args = ap.parse_args()
+    global SKIP_SESSIONS
+    SKIP_SESSIONS = set(s.strip() for s in args.skip.split(",") if s.strip())
 
     if args.recordings:
         data = process_recordings(Path(args.recordings))
