@@ -12,7 +12,8 @@ import subprocess
 import argparse
 
 # Kaggle slugifies kernel titles: "RL loop worker N" -> rl-loop-worker-N
-KERNELS = [f"rl-loop-worker-{i}" for i in range(1, 6)] + ["rl-loop-trainer-gpu"]
+# fleet = 4 workers + 1 CPU trainer (platform caps concurrent CPU at 5)
+KERNELS = [f"rl-loop-worker-{i}" for i in range(1, 5)] + ["rl-loop-trainer-cpu"]
 ALIVE = ("RUNNING", "QUEUED")
 
 
@@ -48,7 +49,7 @@ def main():
         import launch_loop_kernels as L
         hf = os.environ.get("HF_TOKEN", "").strip()
         for k in dead:
-            if k == "rl-loop-trainer-gpu":
+            if k == "rl-loop-trainer-cpu":
                 code = (L.TRAINER_BOOT.replace("@@HF@@", hf)
                         .replace("@@REPO@@", L.GH_REPO_URL)
                         .replace("@@HOURS@@", "9.0").replace("@@DELAY@@", "0"))

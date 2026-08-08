@@ -43,14 +43,15 @@ print("WORKER_SESSION_DONE", flush=True)
 
 TRAINER_BOOT = '''import os, sys, subprocess, time
 os.environ.setdefault("HF_TOKEN", "@@HF@@")
-print("trainer boot (GPU, delayed @@DELAY@@min so workers fill HF first)", flush=True)
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "torch==2.4.1",
-                "--index-url", "https://download.pytorch.org/whl/cu121"], check=False)
+print("trainer boot (CPU — GPU saved for final pushes; delayed @@DELAY@@min)", flush=True)
+subprocess.run([sys.executable, "-m", "pip", "install", "-q", "torch",
+                "--index-url", "https://download.pytorch.org/whl/cpu"], check=False)
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "numpy",
                 "huggingface_hub", "safetensors"], check=False)
 subprocess.run(["git", "clone", "--depth", "1", "@@REPO@@", "/kaggle/working/bot"],
                check=True)
 os.chdir("/kaggle/working/bot")
+os.environ["FORCE_CPU"] = "1"
 time.sleep(@@DELAY@@ * 60)
 subprocess.run([sys.executable, "scripts/rl_loop.py", "trainer",
                 "--hours", "@@HOURS@@"], check=False)
@@ -69,7 +70,10 @@ def push_kernel(slug: str, title: str, code: str) -> str:
         "language": "python",
         "kernel_type": "script",
         "is_private": True,
-        "enable_gpu": slug == "rl-trainer",
+        # CPU-only fleet: GPU hours are reserved for final big pushes
+        # (user decision 2026-08-08). Platform caps concurrent CPU at 5,
+        # so the default fleet is 4 workers + 1 trainer.
+        "enable_gpu": False,
         "enable_internet": True,
         "kernel_sources": [],
         "dataset_sources": [],
@@ -86,7 +90,7 @@ def push_kernel(slug: str, title: str, code: str) -> str:
 def main():
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--workers", type=int, default=5)
+    ap.add_argument("--workers", type=int, default=4)
     ap.add_argument("--worker-hours", type=float, default=8.5)
     ap.add_argument("--trainer-hours", type=float, default=9.0)
     ap.add_argument("--trainer-delay-min", type=int, default=40)
@@ -107,8 +111,8 @@ def main():
     code = (TRAINER_BOOT.replace("@@HF@@", hf).replace("@@REPO@@", GH_REPO_URL)
             .replace("@@HOURS@@", str(a.trainer_hours))
             .replace("@@DELAY@@", str(a.trainer_delay_min)))
-    out = push_kernel("rl-loop-trainer-gpu", "rl-loop-trainer-gpu", code)
-    print(f"pushed rl-loop-trainer-gpu: {out[:160]}", flush=True)
+    out = push_kernel("rl-loop-trainer-cpu", "rl-loop-trainer-cpu", code)
+    print(f"pushed rl-loop-trainer-cpu: {out[:160]}", flush=True)
 
 
 if __name__ == "__main__":

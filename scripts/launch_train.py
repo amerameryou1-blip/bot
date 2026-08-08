@@ -75,7 +75,7 @@ def main():
         "language": "python",
         "kernel_type": "script",
         "is_private": True,
-        "enable_gpu": True,
+        "enable_gpu": False,  # CPU by user decision 2026-08-08 (GPU reserved)
         "enable_internet": True,
         "competition_sources": [],
         "kernel_sources": [],
