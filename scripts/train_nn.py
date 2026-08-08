@@ -368,7 +368,7 @@ def _train_ppo_batch(net, opt, episodes, epochs=4, gamma=0.99, lam=0.95, clip=0.
 REAL_NPZ = WEIGHTS / "real_vision.npz"
 
 
-def stage_real(net, epochs=10, bs=128, lr=3e-4):
+def stage_real(net, epochs=8, bs=128, lr=1e-4):
     """Fine-tune vision (segmentation) + click head on REAL frames.
 
     Real data comes from scripts/label_real.py (recordings + screenshots):
@@ -409,7 +409,15 @@ def stage_real(net, epochs=10, bs=128, lr=3e-4):
         return {c: (correct[c] / total[c] if total[c] else float("nan")) for c in range(5)}
 
     opt = torch.optim.Adam(net.parameters(), lr=lr)
-    class_w = torch.tensor([1.0, 1.0, 2.5, 2.5, 1.0], device=DEVICE)  # me/enemy upweighted
+    # inverse-frequency class weights from the ACTUAL label distribution
+    # (capped at 25x) — me/enemy are rare in real frames; fixed [1,1,2.5,2.5,1]
+    # lets the model collapse to the majority class (UI).
+    dist = np.bincount(d["labels"].ravel(), minlength=5).astype(np.float64)
+    dist = np.clip(dist, 1, None)
+    inv = dist.sum() / dist
+    inv = np.clip(inv / inv.max(), 0.2, 25.0)
+    class_w = torch.tensor(inv, dtype=torch.float32, device=DEVICE)
+    print(f"[real] inverse-freq class weights: {[round(float(w), 2) for w in inv]}", flush=True)
     for ep in range(epochs):
         net.train()
         tot, nb = 0.0, 0
@@ -431,14 +439,21 @@ def stage_real(net, epochs=10, bs=128, lr=3e-4):
               f"water={acc[0]:.2f} neutral={acc[1]:.2f} me={acc[2]:.2f} enemy={acc[3]:.2f} ui={acc[4]:.2f}",
               flush=True)
 
-    # loud gates (vision quality on REAL frames)
+    # loud gates (vision quality on REAL frames) — the user's ship gates:
+    # water>=97%, me>=90%, enemy>=85%, ui>=98%. Integer keys match
+    # classify_acc() — the old string keys ALWAYS passed (silent-failure bug).
     acc = classify_acc(net, val_i)
-    gates = {"water": 0.90, "me": 0.75, "enemy": 0.70, "ui": 0.90}
+    gates = {0: 0.97, 2: 0.90, 3: 0.85, 4: 0.98}
     fails = [k for k, v in gates.items() if acc.get(k) is not None and acc[k] < v and not np.isnan(acc[k])]
     if fails:
-        print(f"[real] VISION GATE FAILED for {fails} — inspect labels (do not trust real vision yet)", flush=True)
+        names = {0: "water", 2: "me", 3: "enemy", 4: "ui"}
+        print(f"[real] VISION GATE FAILED for {[names.get(k, k) for k in fails]} "
+              f"(acc={ {names.get(k, k): round(acc[k], 3) for k in fails} }) — "
+              f"REAL VISION NOT TRUSTWORTHY", flush=True)
+        raise RuntimeError("real vision gate failed")
     else:
-        print("[real] VISION GATE PASSED on real frames", flush=True)
+        print(f"[real] VISION GATE PASSED on real frames "
+              f"(water={acc[0]:.3f} me={acc[2]:.3f} enemy={acc[3]:.3f} ui={acc[4]:.3f})", flush=True)
 
     # click clone on real clicks (if present)
     if has_clicks and len(d["kind"]) > 0:
