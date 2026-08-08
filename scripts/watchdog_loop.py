@@ -38,6 +38,13 @@ def main():
         if not any(x in s for x in ALIVE):
             dead.append(k)
     if a.relaunch and dead:
+        # a CPU slot just freed -> ferry any recordings zips waiting on GH
+        try:
+            subprocess.run([sys.executable,
+                            os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                         "push_migrate.py")], timeout=2400)
+        except Exception as e:
+            print(f"migrate hop failed: {e}")
         import launch_loop_kernels as L
         hf = os.environ.get("HF_TOKEN", "").strip()
         for k in dead:
