@@ -143,16 +143,32 @@ class MouseControls(InputSource):
 
     # -- actions -----------------------------------------------------------
 
+    def _clamp(self, x: float, y: float) -> tuple[float, float]:
+        """Keep gameplay clicks OUT of UI rects (1280x800 viewport).
+
+        Vision session 1, match #6: an attack click on the top "Players"
+        banner opened the account modal, which swallowed every later click
+        and froze the match. UI zones: top banner (y<50), leaderboard
+        (x<310,y<310), bottom bar (y>740), right zoom buttons (x>1210).
+        """
+        x = float(min(max(x, 8), 1200))
+        y = float(min(max(y, 52), 738))
+        if x < 310 and y < 310:
+            x, y = 320.0, 320.0
+        return x, y
+
     def expand(self, x: float, y: float) -> None:
         """Double-click neutral land adjacent to my territory to claim it.
 
         The game claims land on DOUBLE-click (confirmed by the player).
         """
+        x, y = self._clamp(x, y)
         self.page.mouse.dblclick(x, y)
         self.last_action = f"expand({x:.0f},{y:.0f})"
 
     def attack(self, x: float, y: float, pct: float) -> None:
         """Hover enemy border, set slider, double-click (land attack)."""
+        x, y = self._clamp(x, y)
         self.set_slider(pct)
         self.page.mouse.move(x, y)
         time.sleep(0.05)
@@ -160,6 +176,7 @@ class MouseControls(InputSource):
         self.last_action = f"attack({x:.0f},{y:.0f},{pct:.0f}%)"
 
     def send_boat(self, x: float, y: float, pct: float) -> None:
+        x, y = self._clamp(x, y)
         self.set_slider(pct)
         self.page.mouse.move(x, y)
         time.sleep(0.05)

@@ -550,6 +550,16 @@ def main(record: bool = False, upload: bool = False,
                     except Exception as e:
                         log(f"  rediscover err: {e}")
                     last_ocr = time.time()
+                # modal recovery: the account table ("Players" banner click)
+                # draws full-width white rule lines around y~170; if seen,
+                # click Back so the match unfreezes (match #6 post-mortem)
+                try:
+                    if float((img[168:176] > 210).mean()) > 0.5:
+                        log("[ui] account modal detected — closing via Back")
+                        page.mouse.click(640, 757)
+                        time.sleep(0.5)
+                except Exception:
+                    pass
                 # mid-match camera maintenance: our blob grows and fills the
                 # view again; one trusted zoom-out keeps recordings usable
                 if time.time() - last_cam > 20:
