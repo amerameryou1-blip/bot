@@ -172,6 +172,13 @@ class ClickPlanner:
                 return ClickAction("attack", target[1], target[2], cfg.attack_pct,
                                    reason=f"spend->attack({target[2]})")
 
+        # 5b) no neutral left anywhere -> war economy: attack even below
+        # spend density (vision session 1: bot expanded to 37% of the map
+        # then banked forever while the leader outgrew it)
+        if not len(state.expand_targets) and target is not None:
+            return ClickAction("attack", target[1], target[2], cfg.attack_pct,
+                               reason=f"no-neutral->attack({target[2]})")
+
         # 6) bank and compound toward red interest
         return ClickAction("bank", reason=f"idle(d={density:.0f})")
 

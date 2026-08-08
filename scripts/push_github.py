@@ -84,21 +84,31 @@ def main():
                        capture_output=True, text=True)
     print(r.stdout.strip()[-200:] or r.stderr.strip()[-200:])
     if r.returncode != 0:
-        print("kernel push failed"); sys.exit(1)
+        # DO NOT delete locals: the zip is on GH but not on HF yet.
+        print("FAIL: kernel push failed (CPU slots full?) — locals kept, "
+              "zip safe on GH; re-run when a slot frees up"); sys.exit(1)
 
-    # 4) poll
-    for i in range(60):
+    # 4) poll — require a fresh RUNNING first, so a STALE COMPLETE from an
+    #    older run can never trick us into deleting local data (bug found
+    #    2026-08-08: stale COMPLETE + failed push = locals deleted pre-HF)
+    seen_running = False
+    st = "running"
+    for i in range(90):
         s = subprocess.run(["kaggle", "kernels", "status", KERNEL],
                            capture_output=True, text=True).stdout
-        st = "running"
-        if "COMPLETE" in s: st = "COMPLETE"
-        elif "ERROR" in s: st = "ERROR"
+        if "RUNNING" in s or "QUEUED" in s:
+            seen_running = True
+            st = "running"
+        elif seen_running and "COMPLETE" in s:
+            st = "COMPLETE"
+        elif seen_running and "ERROR" in s:
+            st = "ERROR"
         print(f"[{i}] {st}")
         if st in ("COMPLETE", "ERROR"):
             break
         time.sleep(20)
     if st != "COMPLETE":
-        print("FAIL: migrate kernel did not complete"); sys.exit(1)
+        print("FAIL: migrate kernel did not complete — locals kept"); sys.exit(1)
 
     # 5) mark pushed + delete local copies (unless --keep)
     with open(PUSHED_LOG, "a") as f:

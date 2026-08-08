@@ -468,6 +468,7 @@ def main(record: bool = False, upload: bool = False,
         start = time.time()
         last_shot = time.time()
         last_ocr = time.time()
+        last_cam = time.time()
         last_enemy_colors: set = set()   # track COLORS (labels get reassigned)
         seen_counts: dict = {}           # stability: colors seen steadily
         miss_counts: dict = {}           # colors missing steadily -> eliminated
@@ -549,6 +550,20 @@ def main(record: bool = False, upload: bool = False,
                     except Exception as e:
                         log(f"  rediscover err: {e}")
                     last_ocr = time.time()
+                # mid-match camera maintenance: our blob grows and fills the
+                # view again; one trusted zoom-out keeps recordings usable
+                if time.time() - last_cam > 20:
+                    try:
+                        from bot.camera import verify_view, _click_zoom
+                        v = verify_view(img, tuple(palette.self_color.rgb))
+                        if v["self_frac"] > 10:
+                            _click_zoom(page, "out")
+                            log(f"[camera] mid-match zoom-out "
+                                f"(self={v['self_frac']}%)")
+                        time.sleep(0.4)
+                    except Exception as e:
+                        log(f"  cam-maint err: {e}")
+                    last_cam = time.time()
                 if time.time() - last_shot > 5:
                     snapshot(page)
                     last_shot = time.time()
