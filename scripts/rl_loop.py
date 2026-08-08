@@ -275,7 +275,9 @@ def mode_trainer(hours):
         json.dump(best, open(BEST_JSON, "w"), indent=2)
         log(f"seeded best from v14 checkpoint: wr={wr:.2f} rank={rank:.2f}")
     while time.time() < t_end:
+        t_it = time.time()
         # pull new HF shards
+        log(f"[hb] iter start (pending local={len(list(SHARDS.glob('shard_*.npz')))})")
         if api:
             try:
                 files = api.list_repo_files(HF_DATASET, repo_type="dataset", token=tok)
@@ -307,9 +309,13 @@ def mode_trainer(hours):
             continue
         net, _ = load_latest_net()
         opt = T.make_optimizer(net)   # Muon+AdamW hybrid, NaN-watchdogged
+        log(f"[hb] training on {len(episodes)} episodes "
+            f"({time.time()-t_it:.0f}s since iter start)")
         loss = T._train_ppo_batch(net, opt, episodes, epochs=epochs)
         wr, rank = T.evaluate(net, seeds=int(os.environ.get("EVAL_SEEDS", "4")),
                               silent=True)
+        log(f"[hb] trained loss={loss:.3f} wr={wr:.2f} rank={rank:.2f} "
+            f"({time.time()-t_it:.0f}s)")
         msg = (f"trainer iter: shards={len(pending)} episodes={len(episodes)} "
                f"loss={loss:.3f} | LAST-SURVIVOR wr={wr:.2f} rank={rank:.2f} "
                f"(best {best['wr']:.2f})")
@@ -320,6 +326,21 @@ def mode_trainer(hours):
             if wr >= ship_wr:
                 msg += f" | SHIP GATE (>= {ship_wr}) REACHED"
         log(msg)
+        # telemetry heartbeat: tiny file, one commit per iteration, so the
+        # trainer is observable from outside (learned 2026-08-09 the hard way)
+        try:
+            api_h, tok_h = _hf_api()
+            if api_h:
+                hb = RL / "hb.json"
+                json.dump({"ts": int(time.time()), "iter_s": int(time.time() - t_it),
+                           "loss": round(float(loss), 4), "wr": round(float(wr), 3),
+                           "rank": round(float(rank), 2), "shards": len(pending)},
+                          open(hb, "w"))
+                api_h.upload_file(path_or_fileobj=str(hb),
+                                  path_in_repo="rl/trainer_heartbeat.json",
+                                  repo_id=HF_DATASET, repo_type="dataset", token=tok_h)
+        except Exception as e:
+            log(f"[hb] upload skipped ({str(e)[:50]})")
         for p in pending:
             p.rename(DONE / p.name)
         # storage hygiene (user 2026-08-08): experience is now IN the weights —
