@@ -15,7 +15,10 @@ must WIN AS **LAST SURVIVOR** (by elimination — NOT biggest area).
 >   1. **Labeler bug**: dark map pixels (dark navy ocean, dark land) were labeled UI → the NN literally could not learn water/land. Rewrote `classify_frame`: UI = screen regions + bright text only, no darkness floor, neutral fallback. Water purity now 98.5%, enemy class 2.5%→11%.
 >   2. **Silent gate bug**: `classify_acc` returns INT keys but the gate checked STRING keys → `acc.get("water")` was always None → **gate always PASSED**. Fixed to int keys with the user's real gates (water≥97%, me≥90%, enemy≥85%, ui≥98%) and it now RAISES on failure.
 >   3. Class weights: fixed [1,1,2.5,2.5,1] → sqrt-inverse-frequency; LR 3e-4→5e-5.
-> - 🚀 **v6 GPU training RUNNING** with all fixes + 26 HF sessions (b1-b4)
+> - 🚀 **v6/v13 GPU run: FAILED LOUDLY (by design)** — the fixed gate caught the real-stage collapse (water 0.00, me 0.57, enemy 0.00, ui 0.09) and STOPPED the run at 3403s instead of shipping garbage. Vision itself improved: eval **win-rate 0.33 / rank 2.83** (best ever; v5 was 0.17/8.0). 26 sessions / 5,635 real frames pulled + labeled on the GPU.
+> - 🔧 **v13 root causes found:** (1) real stage fed the model uint8 0-255 frames while sim trained on 0-1 → transfer wrecked; (2) 1/freq weights starved water/enemy/ui. **v14 fixes (committed):** normalized rgb_all, capped sqrt-inverse weights [0.2,0.8], cosine LR 3e-5, sim-mixing every 2nd batch, rare-class frame oversampling, 12 epochs.
+> - 🚀 **v14 GPU training RUNNING** (2026-08-08)
+
 > - 🔧 **PPO fixes (v7-ready, verified locally):** v5 PPO showed loss=0.000 (per-episode advantage normalization zeroes gradients when rewards are near-constant). Fixed: GLOBAL batch normalization + reward scale x10 + entropy 0.05 + save BEST eval model (was: last round overwrote best). Verified: loss 0.346 on the exact constant-reward case that gave 0.000.
 
 > - 📦 Data flow: sandbox records → private GitHub repo → migration kernel → HF (HF IP-blocked from sandbox; Kaggle dataset attach flaky)
