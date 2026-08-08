@@ -41,6 +41,13 @@ must WIN AS **LAST SURVIVOR** (by elimination — NOT biggest area).
 >   `launch_loop_kernels.py`, `watchdog_loop.py`. **5 CPU workers + 1 GPU
 >   trainer RUNNING on Kaggle** (GPU used for training only, per user rule).
 > - ✅ 47/47 tests green after every change; repo pushed; workspace 11MB.
+> - 🎥 6 real matches recorded with the FIXED camera (wide combat views,
+>   attacks happening). Zips are on the private `bot-recordings` GH repo;
+>   HF migration pending a free CPU slot (5 workers occupy all batch slots —
+>   `scripts/push_migrate.py` + watchdog auto-ferry when one frees).
+> - 🔁 Resume recipe (any session): setup §6 → `scripts/watchdog_loop.py
+>   --relaunch` (restarts dead kernels AND ferries recordings) → watch
+>   `rl/best.json` wr trend toward the ≥0.30 ship gate.
 
 ---|---------|-----|------|--------|--------|----------|---------|----------------|
 | 1 | 20260807-202555-355808 | Island | 1 | 120 | 120 | FAIL | 4 | no |
