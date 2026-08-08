@@ -7,59 +7,18 @@ must WIN AS **LAST SURVIVOR** (by elimination — NOT biggest area).
 
 ---
 
-> ## ⚡ OVERNIGHT SESSION PROGRESS (2026-08-07, autonomous)
-> - ✅ **Zoom blocker FIXED** — numeric proof: self blob 0.3-0.5% → 1.2-1.9% in window, ≥2 enemies; ~80% PASS by batch 3
-> - ✅ **19 real matches recorded** (~4,200 frames + clicks) → HF `recordings/` (13/13 verified; b3 in flight)
-> - ✅ **Auto-labeler validated on real data**: 1,509 frames → real_vision.npz (uint8, 6.8MB), 5-class labels + click targets
-> - ✅ **2 real last-survivor wins**; attack config now aggressive (density 42, ratio 1.5, pct 15)
-> - 🚀 **GPU training RUNNING** on Kaggle `bot-train-nn` (collect → vision → clone → real → PPO → eval → export)
-> - 🔧 Fixed: menu nav/lobby bug, Reset-Scenario exits editor, notebook kernels don't auto-execute via API (script kernels do), Kaggle attach timing, secret-scan
-> - 📦 Data flow: sandbox records → private Kaggle dataset → migration kernel → HF (HF IP-blocked from sandbox)
+> ## ⚡ OVERNIGHT SESSION PROGRESS (2026-08-07→08, autonomous)
+> - ✅ **Zoom blocker FIXED** — numeric proof: self blob 0.3-0.5% → 1.2-1.9% in window, ≥2 enemies; ~80% PASS by batch 3-4
+> - ✅ **25 real matches recorded** (~5,500 frames + clicks) → HF `recordings/` (b1-b4 verified; b5 recording)
+> - ✅ **v5 GPU run completed end-to-end** (P100, torch 2.4.1+cu121 auto-fixed): collect→vision→clone→real→PPO→eval→exported model.safetensors to `amer224/territorial-bot-nn`
+> - ❌ **v5 quality FAILED (caught loudly, NOT shipped):** the real-stage fine-tune collapsed segmentation to all-UI. Root causes found & FIXED:
+>   1. **Labeler bug**: dark map pixels (dark navy ocean, dark land) were labeled UI → the NN literally could not learn water/land. Rewrote `classify_frame`: UI = screen regions + bright text only, no darkness floor, neutral fallback. Water purity now 98.5%, enemy class 2.5%→11%.
+>   2. **Silent gate bug**: `classify_acc` returns INT keys but the gate checked STRING keys → `acc.get("water")` was always None → **gate always PASSED**. Fixed to int keys with the user's real gates (water≥97%, me≥90%, enemy≥85%, ui≥98%) and it now RAISES on failure.
+>   3. Class weights: fixed [1,1,2.5,2.5,1] → sqrt-inverse-frequency; LR 3e-4→5e-5.
+> - 🚀 **v6 GPU training RUNNING** with all fixes + 26 HF sessions (b1-b4)
+> - 📦 Data flow: sandbox records → private GitHub repo → migration kernel → HF (HF IP-blocked from sandbox; Kaggle dataset attach flaky)
 
-## 🔄 LIVE STATUS — 2026-08-07 (overnight autonomous session)
-
-### ✅ THE #1 BLOCKER IS FIXED — CAMERA / ZOOM
-
-**Problem:** the game spawns the camera on our tiny territory (or auto-fits a wide
-view) and the bot could not see the map or enemies; recordings were ~90% useless.
-
-**Fix (`src/bot/camera.py`):**
-1. Found the game's zoom core in its inline JS:
-   `du.zoom(ft,fg,fh){hs*=ft; hq=(hq+fg)*ft-fg; hr=(hr+fh)*ft-fh;}` (private,
-   not reachable from window) — but the wheel path runs through a DOM listener
-   on `canvasA` (`wheel` → `eZ.fb(clientX,clientY,deltaY)` → `du.zoom`+`fk`).
-2. `fix_camera()` dispatches **synthetic `WheelEvent`s on `canvasA`** at OUR
-   BLOB's screen position (zoom is centered on the cursor → zooms toward us).
-3. Stepped search (1.33×/tick, verify-after-each) until our territory is
-   **1–6% of the screen** AND **≥2 distinct enemy clusters** visible.
-4. **Numeric PASS/FAIL gate** (`verify_view()`): `self_frac`, `enemies_visible`,
-   per-run diagnostics saved to `bot_output/cam_ok|cam_fail_*.png`.
-
-**Evidence (probe runs, Island):**
-```
-baseline self blob = 0.30-0.52%  →  after fix: 1.2-1.9%, enemies 2-6  ✅ PASS
-```
-Camera state (zoom level, self %, enemies) is stored in every recording's
-`meta.json` — see session table.
-
-### ✅ BONUS FIXES (found while fixing zoom)
-- **Menu nav bug:** the old `btn()` scanned only `<button>`s; menu items are
-  `<div>/<p>` with emoji prefixes (`🗡️\nCustom Scenario`) → the bot sometimes
-  missed "Custom Scenario" and its strict "Play" click **joined the multiplayer
-  lobby** instead of a match. New `src/bot/ui.py`: scans ALL elements
-  (leaf-preferred), strict emoji-stripped Play matcher, **lobby detection via
-  OCR + automatic retry**.
-- **"Reset Scenario" exits the editor** (empirically verified) — the flow no
-  longer clicks it (editor opens with correct defaults).
-- **Recorder frames downscaled to 256px wide** (NN input is 64×64; clicks kept
-  in original coords with `frame_scale` in meta) → ~10× less storage.
-- **Spawn fallback:** if blob-diff detection fails, calibrate from the
-  leaderboard swatch (OCR).
-
-### 📊 SESSION TABLE (real matches recorded — all uploaded to HF `amer224/territorial-bot-data/recordings/`)
-
-| # | session | map | zoom | frames | clicks | cam gate | enemies | last survivor |
-|---|---------|-----|------|--------|--------|----------|---------|----------------|
+---|---------|-----|------|--------|--------|----------|---------|----------------|
 | 1 | 20260807-202555-355808 | Island | 1 | 120 | 120 | FAIL | 4 | no |
 | 2 | 20260807-202738-3742a0 | Island | 1 | 220 | 220 | FAIL | 5 | no |
 | 3 | 20260807-203007-498b7f | Island | 0 | 260 | 260 | PASS | 3 | no |
