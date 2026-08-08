@@ -12,8 +12,10 @@ import subprocess
 import argparse
 
 # Kaggle slugifies kernel titles: "RL loop worker N" -> rl-loop-worker-N
-# fleet = 4 workers + 1 CPU trainer (platform caps concurrent CPU at 5)
-KERNELS = [f"rl-loop-worker-{i}" for i in range(1, 5)] + ["rl-loop-trainer-cpu"]
+# fleet = 3 workers + CPU trainer + CPU v15 = exactly the 5-CPU cap
+# (Kaggle enforces it server-side; stay AT it, never over — user TOS check
+# 2026-08-08: CPU batch cap 5, GPU cap 2, separate pools)
+KERNELS = [f"rl-loop-worker-{i}" for i in range(1, 4)] + ["rl-loop-trainer-cpu"]
 ALIVE = ("RUNNING", "QUEUED")
 
 

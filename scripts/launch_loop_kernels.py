@@ -90,7 +90,7 @@ def push_kernel(slug: str, title: str, code: str) -> str:
 def main():
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--worker-hours", type=float, default=8.5)
     ap.add_argument("--trainer-hours", type=float, default=9.0)
     ap.add_argument("--trainer-delay-min", type=int, default=40)
