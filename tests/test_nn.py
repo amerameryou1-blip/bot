@@ -52,3 +52,28 @@ def test_segmentation_on_synthetic_frame(net):
     per_pixel = probs[0].sum(dim=0)
     assert float(per_pixel.max()) <= 1.0 + 1e-3
     assert float(per_pixel.min()) >= 1.0 - 1e-3
+
+
+def test_v2_param_budget():
+    """The 2M brain: big enough to matter, small enough for CPU."""
+    from nn.model import count_params, TerritoryNet as TN
+    n = count_params(TN())
+    assert 1_500_000 < n < 2_500_000, n
+
+
+def test_hybrid_muon_optimizer_runs():
+    """Muon(2D)+AdamW(1D) hybrid: one step without NaN or crash."""
+    import os, sys
+    from nn.model import TerritoryNet as TN
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "scripts"))
+    from train_nn import make_optimizer
+    m = TN()
+    opt = make_optimizer(m)
+    x = torch.randn(2, 3, 64, 64)
+    loss = m.forward(x, None)[0].mean()
+    assert opt.finite_ok(loss)
+    opt.zero_grad()
+    loss.backward()
+    opt.step()
+    loss2 = m.forward(x, None)[0].mean()
+    assert torch.isfinite(loss2)

@@ -291,7 +291,7 @@ def mode_trainer(hours):
                 p.rename(DONE / p.name)
             continue
         net, _ = load_latest_net()
-        opt = torch.optim.Adam(net.parameters(), lr=1e-4)
+        opt = T.make_optimizer(net)   # Muon+AdamW hybrid, NaN-watchdogged
         loss = T._train_ppo_batch(net, opt, episodes, epochs=epochs)
         wr, rank = T.evaluate(net, seeds=6, silent=True)
         msg = (f"trainer iter: shards={len(pending)} episodes={len(episodes)} "

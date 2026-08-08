@@ -119,14 +119,169 @@ def make_net():
 
 def save_model(net):
     torch.save(net.state_dict(), MODEL_PT)
-    json.dump({"grid": GRID, "context_dim": CTX_DIM, "classes": NUM_CLASSES},
+    json.dump({"grid": GRID, "context_dim": CTX_DIM, "classes": NUM_CLASSES,
+               "params": count_params(net)},
               open(CFG_JSON, "w"), indent=2)
 
 
 def load_model(net):
+    """Shape-safe: an old 85k checkpoint can never crash a new 2M net."""
     if MODEL_PT.exists():
-        net.load_state_dict(torch.load(MODEL_PT, map_location=DEVICE))
-        print("loaded checkpoint", flush=True)
+        try:
+            net.load_state_dict(torch.load(MODEL_PT, map_location=DEVICE))
+            print("loaded checkpoint", flush=True)
+        except Exception as e:
+            print(f"checkpoint shape mismatch ({str(e)[:60]}) — fresh net",
+                  flush=True)
+
+
+# ================================================== 2026 optimizer recipe ===
+class Muon(torch.optim.Optimizer):
+    """Orthogonalized-momentum optimizer for 2D params (KellerJordan style).
+    2026 evidence: beats AdamW on vision (arXiv 2605.24770), ~35% faster
+    (PyTorch blog); the hybrid Muon(2D)+AdamW(1D) won small-scale practice
+    (r/LocalLLaMA)."""
+
+    def __init__(self, params, lr=0.02, momentum=0.95, weight_decay=0.01):
+        super().__init__(params, dict(lr=lr, momentum=momentum,
+                                      weight_decay=weight_decay))
+
+    @staticmethod
+    def _ns(g, steps=5, eps=1e-7):
+        orig = g.shape
+        if g.dim() > 2:
+            g = g.reshape(orig[0], -1)
+        g = g / (g.norm() + eps)
+        a, b, c = 3.4445, -4.7750, 2.0315
+        for _ in range(steps):
+            gram = g @ g.T
+            g = a * g + (b * gram + c * gram @ gram) @ g
+        return g.reshape(orig)
+
+    @torch.no_grad()
+    def step(self, closure=None):
+        for grp in self.param_groups:
+            lr = grp["lr"]
+            for p in grp["params"]:
+                if p.grad is None:
+                    continue
+                st = self.state[p]
+                if "buf" not in st:
+                    st["buf"] = torch.zeros_like(p.grad)
+                st["buf"].mul_(grp["momentum"]).add_(p.grad)
+                if grp["weight_decay"]:
+                    p.mul_(1 - lr * grp["weight_decay"])
+                p.add_(self._ns(st["buf"]), alpha=-lr)
+
+
+class HybridOpt:
+    """Muon on matrices + AdamW on scalars; one .step()/.zero_grad() API and a
+    loud NaN watchdog (skip the step, and if it keeps happening, fall back to
+    pure AdamW — never ship NaN weights)."""
+
+    def __init__(self, net, lr_muon=0.02, lr_adam=3e-4):
+        mats = [p for p in net.parameters() if p.dim() >= 2 and p.requires_grad]
+        rest = [p for p in net.parameters() if p.dim() < 2 and p.requires_grad]
+        self.muon = Muon(mats, lr=lr_muon) if mats else None
+        self.adam = torch.optim.AdamW(rest, lr=lr_adam) if rest else None
+        self._nan_streak = 0
+        self._degraded = False
+
+    def zero_grad(self):
+        if self.muon:
+            self.muon.zero_grad()
+        if self.adam:
+            self.adam.zero_grad()
+
+    def set_lr(self, lr_adam, lr_muon=None):
+        if self.adam:
+            for g in self.adam.param_groups:
+                g["lr"] = lr_adam
+        if self.muon and lr_muon:
+            for g in self.muon.param_groups:
+                g["lr"] = lr_muon
+
+    def finite_ok(self, loss) -> bool:
+        """Call BEFORE backward; loud watchdog with graceful degradation."""
+        ok = bool(torch.isfinite(torch.as_tensor(loss)))
+        if ok:
+            self._nan_streak = 0
+            return True
+        self._nan_streak += 1
+        print(f"[opt] NON-FINITE loss ({self._nan_streak} in a row) — skipping step",
+              flush=True)
+        if self._nan_streak >= 5 and not self._degraded and self.muon:
+            print("[opt] LOUD: Muon unstable — degrading to AdamW-only", flush=True)
+            self._degraded = True
+            self.muon = None
+        return False
+
+    def step(self):
+        if self.muon:
+            self.muon.step()
+        if self.adam:
+            self.adam.step()
+
+
+def make_optimizer(net):
+    return HybridOpt(net)
+
+
+def _augment(xb, yb=None):
+    """Cheap 2026 vision recipe: random hflip + brightness jitter.
+    (Muon gains scale with augmentation — arXiv 2605.24770.)"""
+    if np.random.rand() < 0.5:
+        xb = torch.flip(xb, dims=[-1])
+        if yb is not None:
+            yb = torch.flip(yb, dims=[-1])
+    xb = xb * (0.88 + 0.24 * np.random.rand())
+    return xb.clamp(0, 1), yb
+
+
+# ========================================================== seed (distill) ==
+def stage_seed(net, epochs=2, bs=256):
+    """Distill the old 85k teacher into the new 2M net so it starts smart
+    instead of random (teacher-student is the mature 2026 recipe)."""
+    tp = WEIGHTS / "teacher.pt"
+    if not tp.exists() or not DATASET.exists():
+        print("[seed] no teacher.pt or dataset — skipping", flush=True)
+        return net
+    from nn.model import TerritoryNetSmall
+    teacher = TerritoryNetSmall(grid=GRID, context_dim=CTX_DIM).to(DEVICE)
+    try:
+        teacher.load_state_dict(torch.load(tp, map_location=DEVICE))
+    except Exception as e:
+        print(f"[seed] teacher load failed ({str(e)[:60]}) — skipping", flush=True)
+        return net
+    teacher.eval()
+    opt = make_optimizer(net)
+    d = np.load(DATASET, mmap_mode="r")
+    n = len(d["rgb"])
+    for ep in range(epochs):
+        net.train()
+        tot, nb = 0.0, 0
+        for i in range(0, n, bs):
+            xb = torch.tensor(d["rgb"][i:i + bs], dtype=torch.float32, device=DEVICE)
+            yb = torch.tensor(d["seg"][i:i + bs], dtype=torch.int64, device=DEVICE)
+            with torch.no_grad():
+                t_seg, _, t_click, t_kind, _, _ = teacher.forward(xb, None, return_all=True)
+            seg, local, click, kind, pct, _ = net.forward(xb, None, return_all=True)
+            yb16 = F.interpolate(yb.float().unsqueeze(1), size=(GRID, GRID),
+                                 mode="nearest").long().squeeze(1)
+            loss = F.cross_entropy(seg, yb16, label_smoothing=0.05)
+            loss = loss + F.kl_div(F.log_softmax(seg, 1), F.softmax(t_seg, 1),
+                                   reduction="batchmean")
+            loss = loss + F.kl_div(F.log_softmax(click, 1), F.softmax(t_click, 1),
+                                   reduction="batchmean")
+            loss = loss + F.kl_div(F.log_softmax(kind, 1), F.softmax(t_kind, 1),
+                                   reduction="batchmean")
+            if not opt.finite_ok(loss):
+                opt.zero_grad()
+                continue
+            opt.zero_grad(); loss.backward(); opt.step()
+            tot += loss.item(); nb += 1
+        print(f"  seed epoch {ep + 1}: loss={tot / max(nb, 1):.4f}", flush=True)
+    return net
 
 
 # ================================================================ collect ====
@@ -155,7 +310,7 @@ def stage_collect(seeds=None, bot_skill="medium", workers=None):
 
 # ================================================================ vision ====
 def stage_vision(net, epochs=8, bs=256, lr=1e-3):
-    opt = torch.optim.Adam(net.parameters(), lr=lr)
+    opt = make_optimizer(net)
     seg_w = torch.tensor([1.0, 1.2, 3.0, 2.0, 1.0], device=DEVICE)
     d = np.load(DATASET, mmap_mode="r")
     n = len(d["rgb"])
@@ -167,18 +322,22 @@ def stage_vision(net, epochs=8, bs=256, lr=1e-3):
             xb = torch.tensor(d["rgb"][i:i+bs], dtype=torch.float32, device=DEVICE)
             yb = torch.tensor(d["seg"][i:i+bs], dtype=torch.int64, device=DEVICE)
             cb = torch.tensor(d["centroid"][i:i+bs], dtype=torch.float32, device=DEVICE)
+            xb, yb = _augment(xb, yb)
             seg, local, *_ = net.forward(xb, return_all=True)
             yb16 = F.interpolate(yb.float().unsqueeze(1), size=(GRID, GRID), mode="nearest").long().squeeze(1)
-            loss = F.cross_entropy(seg, yb16, weight=seg_w) + F.mse_loss(local, cb) * 5.0
+            loss = F.cross_entropy(seg, yb16, weight=seg_w, label_smoothing=0.05) \
+                + F.mse_loss(local, cb) * 5.0
+            if not opt.finite_ok(loss):
+                opt.zero_grad(); continue
             opt.zero_grad(); loss.backward(); opt.step()
             tot += loss.item(); nb += 1
-        print(f"  vision epoch {ep+1}: loss={tot/nb:.4f}", flush=True)
+        print(f"  vision epoch {ep+1}: loss={tot/max(nb,1):.4f}", flush=True)
     return net
 
 
 # ================================================================ clone ======
 def stage_clone(net, epochs=8, bs=256, lr=1e-3):
-    opt = torch.optim.Adam(net.parameters(), lr=lr)
+    opt = make_optimizer(net)
     d = np.load(DATASET, mmap_mode="r")
     n = len(d["rgb"])
     kind_w = torch.tensor([1.0, 4.0, 1.5], device=DEVICE)
@@ -192,17 +351,20 @@ def stage_clone(net, epochs=8, bs=256, lr=1e-3):
             cb = torch.tensor(d["cell"][i:i+bs], dtype=torch.int64, device=DEVICE)
             pb = torch.tensor(d["pct"][i:i+bs], dtype=torch.float32, device=DEVICE)
             ctx = torch.zeros(xb.shape[0], CTX_DIM, device=DEVICE)
+            xb, _ = _augment(xb)
             click, kind, pct, _ = net.forward(xb, ctx)
-            loss = F.cross_entropy(kind, kb, weight=kind_w)
+            loss = F.cross_entropy(kind, kb, weight=kind_w, label_smoothing=0.05)
             mask = kb != 2
             if mask.any():
                 loss = loss + F.cross_entropy(click[mask], cb[mask]) * 1.5
             am = kb == 1
             if am.any():
                 loss = loss + F.mse_loss(pct[am], pb[am]) * 2.0
+            if not opt.finite_ok(loss):
+                opt.zero_grad(); continue
             opt.zero_grad(); loss.backward(); opt.step()
             tot += loss.item(); nb += 1
-        print(f"  clone epoch {ep+1}: loss={tot/nb:.4f}", flush=True)
+        print(f"  clone epoch {ep+1}: loss={tot/max(nb,1):.4f}", flush=True)
     return net
 
 
@@ -349,16 +511,21 @@ def _train_ppo_batch(net, opt, episodes, epochs=4, gamma=0.99, lam=0.95, clip=0.
     for adv in ep_adv:
         adv[:] = flat[off:off + len(adv)]
         off += len(adv)
-    for ep, adv, ret in zip(episodes, ep_adv, ep_ret):
-        xb = torch.tensor(ep["rgb"], dtype=torch.float32, device=DEVICE) / 255.0
-        cxb = torch.tensor(ep["ctx"], device=DEVICE)
-        kb = torch.tensor(ep["kind"], device=DEVICE)
-        cb = torch.tensor(ep["cell"], device=DEVICE)
-        pb = torch.tensor(ep["pct"], device=DEVICE)
-        old_lp = torch.tensor(ep["logp"], device=DEVICE)
-        adv_t = torch.tensor(adv, dtype=torch.float32, device=DEVICE)
-        ret_t = torch.tensor(ret, device=DEVICE)
-        for _ in range(epochs):
+    # 2026 PPO hygiene: shuffle episode order every epoch + entropy anneal
+    # (explore early, commit late) + non-finite loss watchdog.
+    items = list(zip(episodes, ep_adv, ep_ret))
+    for e_i in range(epochs):
+        np.random.shuffle(items)
+        ent_coef = 0.05 - 0.04 * (e_i / max(epochs - 1, 1))
+        for ep, adv, ret in items:
+            xb = torch.tensor(ep["rgb"], dtype=torch.float32, device=DEVICE) / 255.0
+            cxb = torch.tensor(ep["ctx"], device=DEVICE)
+            kb = torch.tensor(ep["kind"], device=DEVICE)
+            cb = torch.tensor(ep["cell"], device=DEVICE)
+            pb = torch.tensor(ep["pct"], device=DEVICE)
+            old_lp = torch.tensor(ep["logp"], device=DEVICE)
+            adv_t = torch.tensor(adv, dtype=torch.float32, device=DEVICE)
+            ret_t = torch.tensor(ret, device=DEVICE)
             click, kind, pct, value = net.forward(xb, cxb)
             logpk = F.log_softmax(kind, dim=1)
             logpc = F.log_softmax(click, dim=1)
@@ -370,7 +537,9 @@ def _train_ppo_batch(net, opt, episodes, epochs=4, gamma=0.99, lam=0.95, clip=0.
             pg = -torch.min(ratio * adv_t, torch.clamp(ratio, 1 - clip, 1 + clip) * adv_t).mean()
             vf = F.mse_loss(value, ret_t)
             ent = -torch.mean(logpk * logpk.exp())
-            loss = pg + 0.5 * vf - 0.05 * ent
+            loss = pg + 0.5 * vf - ent_coef * ent
+            if not opt.finite_ok(loss):
+                opt.zero_grad(); continue
             opt.zero_grad(); loss.backward(); opt.step()
             tot_loss += loss.item(); nb += 1
     return tot_loss / max(nb, 1)
@@ -420,7 +589,7 @@ def stage_real(net, epochs=12, bs=128, lr=3e-5):
                     correct[c] += int((pred[m] == c).sum())
         return {c: (correct[c] / total[c] if total[c] else float("nan")) for c in range(5)}
 
-    opt = torch.optim.Adam(net.parameters(), lr=lr)
+    opt = make_optimizer(net)
     # v14 class weights: sqrt-inverse-frequency, CAPPED [0.2, 0.8].
     # v13 ran the old 1/freq weights [0.2,0.2,1.0,0.2,0.2] — me=1.0 starved
     # water/enemy/ui at 0.2 -> me-overfit, water/enemy never learned.
@@ -454,7 +623,7 @@ def stage_real(net, epochs=12, bs=128, lr=3e-5):
     lr_min = lr * 0.1
     for ep in range(epochs):
         lr_t = lr_min + 0.5 * (lr - lr_min) * (1 + math.cos(math.pi * ep / max(epochs, 1)))
-        opt.param_groups[0]["lr"] = lr_t
+        opt.set_lr(lr_t)
         net.train()
         tot, nb = 0.0, 0
         order = np.random.choice(len(tr_i), size=len(tr_i),
@@ -471,9 +640,12 @@ def stage_real(net, epochs=12, bs=128, lr=3e-5):
                 # d["rgb"] uint8 0..255 wrecked transfer from the sim stage)
                 xb = torch.tensor(rgb_all[ii].transpose(0, 3, 1, 2), dtype=torch.float32, device=DEVICE)
                 lb = torch.tensor(d["labels"][ii], dtype=torch.int64, device=DEVICE)
+            xb, lb = _augment(xb, lb)
             seg, _, click, kind, pct, _ = net.forward(xb, None, return_all=True)
             lb_g = F.interpolate(lb.float().unsqueeze(1), size=(GRID, GRID), mode="nearest").long().squeeze(1)
-            loss = F.cross_entropy(seg, lb_g, weight=class_w)
+            loss = F.cross_entropy(seg, lb_g, weight=class_w, label_smoothing=0.05)
+            if not opt.finite_ok(loss):
+                opt.zero_grad(); continue
             opt.zero_grad(); loss.backward(); opt.step()
             tot += loss.item(); nb += 1
         acc = classify_acc(net, val_i)
@@ -528,7 +700,7 @@ def stage_ppo(net, rounds=None, episodes_per_worker=1, workers=None, lr=1e-4, ev
     rounds = rounds or int(os.environ.get("PPO_ROUNDS", "40"))
     ncores = os.cpu_count() or 2
     workers = workers or int(os.environ.get("WORKERS", str(ncores - 1 if ncores > 1 else 1)))
-    opt = torch.optim.Adam(net.parameters(), lr=lr)
+    opt = make_optimizer(net)
     import multiprocessing as mp
     pool_eps = []
     skill = "easy"  # curriculum: learn to SURVIVE first (v8: + enemy count)
@@ -648,6 +820,9 @@ def main():
         return
     if stage in ("collect", "all"):
         stage_collect()
+    if stage in ("seed", "all"):
+        net = stage_seed(net)
+        save_model(net)
     if stage in ("vision", "all"):
         net = stage_vision(net)
         save_model(net)
