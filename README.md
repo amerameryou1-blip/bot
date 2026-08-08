@@ -16,6 +16,8 @@ must WIN AS **LAST SURVIVOR** (by elimination — NOT biggest area).
 >   2. **Silent gate bug**: `classify_acc` returns INT keys but the gate checked STRING keys → `acc.get("water")` was always None → **gate always PASSED**. Fixed to int keys with the user's real gates (water≥97%, me≥90%, enemy≥85%, ui≥98%) and it now RAISES on failure.
 >   3. Class weights: fixed [1,1,2.5,2.5,1] → sqrt-inverse-frequency; LR 3e-4→5e-5.
 > - 🚀 **v6 GPU training RUNNING** with all fixes + 26 HF sessions (b1-b4)
+> - 🔧 **PPO fixes (v7-ready, verified locally):** v5 PPO showed loss=0.000 (per-episode advantage normalization zeroes gradients when rewards are near-constant). Fixed: GLOBAL batch normalization + reward scale x10 + entropy 0.05 + save BEST eval model (was: last round overwrote best). Verified: loss 0.346 on the exact constant-reward case that gave 0.000.
+
 > - 📦 Data flow: sandbox records → private GitHub repo → migration kernel → HF (HF IP-blocked from sandbox; Kaggle dataset attach flaky)
 
 ---|---------|-----|------|--------|--------|----------|---------|----------------|
