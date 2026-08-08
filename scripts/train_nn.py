@@ -393,7 +393,9 @@ def _init_worker(state_dict):
 def _policy_action(net, st, game):
     dev = next(net.parameters()).device
     rgb, _ = game.frame_tensor(1, size=64)
-    x = torch.tensor(rgb.transpose(2, 0, 1)[None], dtype=torch.float32, device=dev)
+    # BUGFIX 2026-08-09: frame_tensor returns uint8 0-255; the net expects
+    # 0..1 — every rollout/eval before this ran on 255-scale garbage input.
+    x = torch.tensor(rgb.transpose(2, 0, 1)[None], dtype=torch.float32, device=dev) / 255.0
     with torch.no_grad():
         click, kind, pct, _ = net.forward(x, None)
         probs_k = F.softmax(kind[0], dim=-1)
@@ -426,7 +428,7 @@ def _rollout_one(net, seed, skill, episodes=1, n_bots=None):
             act, pctv = _policy_action(net, st, game)
             dev = next(net.parameters()).device
             rgb, _ = game.frame_tensor(1, size=64)
-            x = torch.tensor(rgb.transpose(2, 0, 1)[None], dtype=torch.float32, device=dev)
+            x = torch.tensor(rgb.transpose(2, 0, 1)[None], dtype=torch.float32, device=dev) / 255.0
             with torch.no_grad():
                 click, kind, pct, _ = net.forward(x, None)
                 probs_k = F.softmax(kind[0], dim=-1)
@@ -501,7 +503,8 @@ def _train_ppo_batch(net, opt, episodes, epochs=4, gamma=0.99, lam=0.95, clip=0.
         T = len(ep["reward"])
         rw = np.array(ep["reward"], dtype=np.float32) * 10.0
         with torch.no_grad():
-            xb = torch.tensor(ep["rgb"], dtype=torch.float32, device=DEVICE) / 255.0
+            # ep["rgb"] is already 0..1 (rollout/unpack) — do NOT /255 again
+            xb = torch.tensor(ep["rgb"], dtype=torch.float32, device=DEVICE)
             cxb = torch.tensor(ep["ctx"], device=DEVICE)
             _, _, _, vals = net.forward(xb, cxb)
             vals = vals.cpu().numpy()
@@ -529,7 +532,7 @@ def _train_ppo_batch(net, opt, episodes, epochs=4, gamma=0.99, lam=0.95, clip=0.
         np.random.shuffle(items)
         ent_coef = 0.05 - 0.04 * (e_i / max(epochs - 1, 1))
         for ep, adv, ret in items:
-            xb = torch.tensor(ep["rgb"], dtype=torch.float32, device=DEVICE) / 255.0
+            xb = torch.tensor(ep["rgb"], dtype=torch.float32, device=DEVICE)
             cxb = torch.tensor(ep["ctx"], device=DEVICE)
             kb = torch.tensor(ep["kind"], device=DEVICE)
             cb = torch.tensor(ep["cell"], device=DEVICE)
