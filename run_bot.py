@@ -272,29 +272,66 @@ def small_territory_colors(img, max_frac=0.03, min_area=60):
     return out
 
 
-def detect_own_color(page, watch_s=18) -> Palette | None:
-    """Click to spawn, then WATCH frames for a small territory to appear.
+def _crown_yellow(c) -> bool:
+    r, g, b = c
+    return abs(r - 240) < 45 and abs(g - 224) < 45 and abs(b - 112) < 60
 
-    Covers both cases: the click-spawn, or the game auto-placing us. Any small
-    saturated blob that appears is our territory (bots' territories are bigger
-    by then; terrain colors are huge). Relaxed 3% threshold — territories grow
-    fast in the first seconds.
+
+def detect_own_color(page, watch_s=18) -> Palette | None:
+    """Spawn by double-click, then SAMPLE our territory color AT THE SPAWN
+    POINTS — causal ground truth.
+
+    Verified by eye (2026-08-08): the leaderboard swatch is polluted by the
+    green row highlight, and the yellow crown + black name label sit ON TOP of
+    our territory (old 'spawn blob' diff was latching onto the CROWN or sand).
+    Sampling the pixels under our click points after claiming is exact.
     """
-    # try to spawn by double-clicking a few land spots first
     img = grab(page)
-    for spot in land_spots(img, n=4):
+    spots = land_spots(img, n=4)
+    for spot in spots:
         page.mouse.dblclick(spot[0], spot[1])
         time.sleep(0.8)
-    # watch for a small territory anywhere
+    time.sleep(1.0)
+    img = grab(page)
+
+    def ok_color(c):
+        if max(c) < 90:                   # black label / shadow
+            return False
+        if _crown_yellow(c):              # the crown icon
+            return False
+        if c[2] > c[0] + 30 and c[2] > 90:  # water
+            return False
+        if max(c) - min(c) < 25:          # gray terrain / UI
+            return False
+        return True
+
+    good = []
+    for (x, y) in spots:
+        patch = img[max(0, y - 4):y + 5, max(0, x - 4):x + 5].reshape(-1, 3).astype(int)
+        med = tuple(int(v) for v in np.median(patch, axis=0))
+        if ok_color(med):
+            good.append(med)
+    if good:
+        c = max(set(good), key=good.count)
+        log(f"SPAWN DETECTED (sampled at clicks): color={list(c)}")
+        lite = [int(v + (255 - v) * 0.55) for v in c]
+        return Palette(self_color=PlayerColor("me", *c),
+                       self_aliases=[PlayerColor("me_lite", *lite)],
+                       tolerance=20.0, downscale=2)
+
+    # fallback: watch for a small territory anywhere (crown excluded)
     deadline = time.time() + watch_s
     while time.time() < deadline:
         time.sleep(0.7)
         img = grab(page)
-        cands = small_territory_colors(img)
+        cands = [(cc, aa) for cc, aa in small_territory_colors(img)
+                 if not _crown_yellow(cc)]
         if cands:
             c, area = cands[0]
-            log(f"SPAWN DETECTED: color={c} blob={area}")
-            return Palette(self_color=PlayerColor("me", *c), enemy_colors=[],
+            log(f"SPAWN DETECTED (watch): color={c} blob={area}")
+            lite = [int(v + (255 - v) * 0.55) for v in c]
+            return Palette(self_color=PlayerColor("me", *c),
+                           self_aliases=[PlayerColor("me_lite", *lite)],
                            tolerance=20.0, downscale=2)
     return None
 
@@ -395,32 +432,9 @@ def main(record: bool = False, upload: bool = False,
             browser.close()
             sys.exit(1)
 
-        # v3.1 (2026-08-08, verified by eye): our leaderboard-row swatch is
-        # GROUND TRUTH. The spawn-blob diff latched onto pale sand terrain,
-        # and calibrate_from_leaderboard's blob sanity filter rejects the
-        # RIGHT swatch at start (zoomed-in camera -> big blob, edges touched).
-        # So read the swatch strip next to our OCR'd row directly.
-        self_aliases = []
-        try:
-            sw = own_swatch_from_leaderboard(page)
-            if sw is not None:
-                a = np.array(sw, dtype=int)
-                b = np.array(palette.self_color.rgb, dtype=int)
-                # the on-map lightened tint of our swatch (game renders our
-                # territory lighter) — counts as "me" in segment()
-                self_aliases = [PlayerColor(
-                    "me_lite", *[int(v + (255 - v) * 0.55) for v in a])]
-                if int(np.abs(a - b).sum()) > 90:
-                    log(f"[color] OVERRIDE spawn-blob {list(b)} -> "
-                        f"leaderboard swatch {list(a)}")
-                    palette = Palette(
-                        self_color=PlayerColor("me", int(a[0]), int(a[1]), int(a[2])),
-                        self_aliases=self_aliases,
-                        enemy_colors=[], tolerance=20.0, downscale=2)
-            else:
-                log("[color] no leaderboard swatch found — keeping spawn-blob color")
-        except Exception as e:
-            log(f"[color] swatch cross-check error: {e}")
+        # self aliases (lightened tint) come from detect_own_color now —
+        # the leaderboard swatch proved unreliable (row highlight pollution).
+        self_aliases = list(getattr(palette, "self_aliases", []))
 
         # 3.5) CAMERA FIX (the #1 blocker): the game spawns zoomed into our
         # territory. Zoom out via the game's own wheel path (synthetic

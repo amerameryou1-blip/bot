@@ -101,13 +101,14 @@ def main():
         for i in range(1, a.workers + 1):
             code = (WORKER_BOOT.replace("@@HF@@", hf).replace("@@REPO@@", GH_REPO_URL)
                     .replace("@@HOURS@@", str(a.worker_hours)))
-            out = push_kernel(f"rl-worker-{i}", f"RL loop worker {i}", code)
-            print(f"pushed rl-worker-{i}: {out[:160]}", flush=True)
+            # title == slug so re-pushes update the SAME kernel
+            out = push_kernel(f"rl-loop-worker-{i}", f"rl-loop-worker-{i}", code)
+            print(f"pushed rl-loop-worker-{i}: {out[:160]}", flush=True)
     code = (TRAINER_BOOT.replace("@@HF@@", hf).replace("@@REPO@@", GH_REPO_URL)
             .replace("@@HOURS@@", str(a.trainer_hours))
             .replace("@@DELAY@@", str(a.trainer_delay_min)))
-    out = push_kernel("rl-trainer", "RL loop trainer (GPU)", code)
-    print(f"pushed rl-trainer: {out[:160]}", flush=True)
+    out = push_kernel("rl-loop-trainer-gpu", "rl-loop-trainer-gpu", code)
+    print(f"pushed rl-loop-trainer-gpu: {out[:160]}", flush=True)
 
 
 if __name__ == "__main__":

@@ -23,6 +23,25 @@ must WIN AS **LAST SURVIVOR** (by elimination — NOT biggest area).
 
 > - 📦 Data flow: sandbox records → private GitHub repo → migration kernel → HF (HF IP-blocked from sandbox; Kaggle dataset attach flaky)
 
+> ## 👁 VISION-AGENT SESSION 1 (2026-08-08, autonomous overnight)
+> - 👁 **Looked at real frames for the first time in project history.** Findings:
+>   1. Camera "stall at 0.01%" = view zoomed INSIDE our own territory (giant name
+>      label on screen). Visible **+/- zoom buttons** on right edge found → trusted
+>      click fallback added to `camera.py`.
+>   2. Old "self color" was the **yellow CROWN icon** ([240,224,112]) or sand; the
+>      leaderboard swatch is polluted by the **green row highlight**. New ground
+>      truth: **sample the map at our spawn clicks** (causal).
+>   3. Game renders our territory in a **lightened tint** → `Palette.self_aliases`
+>      added so `segment()` sees pale shades as "me" (was: max_area 0, 301 banks).
+> - 📉 **HONEST v14 eval (fixed gate): LAST-SURVIVOR win-rate 0.00**, alive 0.17,
+>   rank 8.00 (10-player mixed). Old 0.33 was inflated alive-at-timeout.
+>   `evaluate()` now counts ONLY elimination wins.
+> - 🔁 **Continuous sim-RL loop BUILT & LAUNCHED**: `scripts/rl_loop.py`
+>   (worker/trainer modes, HF-synced shards+checkpoints, local fallback),
+>   `launch_loop_kernels.py`, `watchdog_loop.py`. **5 CPU workers + 1 GPU
+>   trainer RUNNING on Kaggle** (GPU used for training only, per user rule).
+> - ✅ 47/47 tests green after every change; repo pushed; workspace 11MB.
+
 ---|---------|-----|------|--------|--------|----------|---------|----------------|
 | 1 | 20260807-202555-355808 | Island | 1 | 120 | 120 | FAIL | 4 | no |
 | 2 | 20260807-202738-3742a0 | Island | 1 | 220 | 220 | FAIL | 5 | no |
