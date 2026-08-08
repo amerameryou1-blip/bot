@@ -598,6 +598,7 @@ def stage_ppo(net, rounds=None, episodes_per_worker=1, workers=None, lr=1e-4, ev
 def evaluate(net, seeds=6, silent=False):
     net.eval()
     wins = 0
+    survived = 0
     ranks = []
     for seed in range(1, seeds + 1):
         game = _make_game("mixed", seed, n_bots=SIM["n_bots"])
@@ -615,15 +616,23 @@ def evaluate(net, seeds=6, silent=False):
                 actions[pid] = game._bot_clicks(pid)
             game.step(actions)
         alive = game.players[1].alive and (game.world == 1).sum() > 0
-        wins += 1 if alive else 0
+        alive_list = [pid for pid in game._pids if game.players[pid].alive]
+        # HONEST last-survivor gate (2026-08-08 fix, found by vision agent):
+        # "win" = we are the ONLY player alive. The old code counted "still
+        # alive at timeout" as a win, inflating win-rate in unfinished games.
+        is_last = bool(alive) and len(alive_list) == 1
+        wins += 1 if is_last else 0
+        survived += 1 if alive else 0
         areas = {pid: int((game.world == pid).sum()) for pid in game._pids}
         rank = 1 + sum(1 for pid, a in areas.items() if pid != 1 and a > areas[1])
         ranks.append(rank)
     wr = wins / seeds
+    alive_rate = survived / seeds
     avg_rank = sum(ranks) / len(ranks)
     if not silent:
-        print(f"EVAL ({SIM['n_bots']}-player mixed lobby, last-survivor): "
-              f"win-rate={wr:.2f} avg_rank={avg_rank:.2f}", flush=True)
+        print(f"EVAL ({SIM['n_bots']}-player mixed lobby): "
+              f"LAST-SURVIVOR win-rate={wr:.2f} alive-rate={alive_rate:.2f} "
+              f"avg_rank={avg_rank:.2f}", flush=True)
     return wr, avg_rank
 
 

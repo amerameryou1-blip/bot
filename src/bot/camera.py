@@ -51,8 +51,41 @@ def _dispatch_wheel(page, x: int, y: int, delta: int) -> bool:
     ))
 
 
+# Visible on-canvas zoom buttons (1280x800 viewport) — trusted-click path.
+# Verified BY EYE in recorded frames (2026-08-08): round +/- buttons on the
+# right edge, vertically centred. page.mouse.click is trusted by the canvas
+# (unlike page.mouse.wheel, which the game ignores).
+ZOOM_BTN_IN = (1240, 363)
+ZOOM_BTN_OUT = (1240, 443)
+
+
+def _click_zoom(page, direction: str) -> bool:
+    """Click the game's visible zoom button (trusted mouse event)."""
+    x, y = ZOOM_BTN_IN if direction == "in" else ZOOM_BTN_OUT
+    try:
+        page.mouse.click(x, y)
+        return True
+    except Exception:
+        return False
+
+
+def _lighten(c, t=0.55):
+    """The game renders OUR territory as a lightened tint of the swatch
+    color (verified by eye 2026-08-08: swatch [48,180,24] vs on-map mint
+    ~[154,205,166]). A swatch-only mask sees just the border ring and
+    reports ~1.8% while the view is actually zoomed hard into our spawn."""
+    return [int(v + (255 - v) * t) for v in c]
+
+
 def _self_blob(img: np.ndarray, self_rgb, tol: int = 24):
-    return blob(img, list(self_rgb), tol=tol, min_area=10)
+    a = blob(img, list(self_rgb), tol=tol, min_area=10)
+    b = blob(img, _lighten(self_rgb), tol=28, min_area=10)
+    if a and b:
+        m = a["mask"] | b["mask"]
+        c = np.argwhere(m)
+        return {"area": len(c), "cy": float(c[:, 0].mean()),
+                "cx": float(c[:, 1].mean()), "mask": m}
+    return b or a
 
 
 def self_blob_frac(img: np.ndarray, self_rgb, tol: int = 24) -> float:
@@ -230,8 +263,19 @@ def fix_camera(page, grab, self_rgb, bot_name: str | None = None,
             img = grab()
             new_frac = self_blob_frac(img, self_rgb)
             if abs(new_frac - frac) < 1e-4:
-                log(f"[camera] zoom stalled at {frac * 100:.2f}% — stopping search")
-                break
+                log(f"[camera] wheel stalled at {frac * 100:.2f}% — trusted-button fallback")
+                _click_zoom(page, "out")
+                time.sleep(_TICK_DELAY_S)
+                _click_zoom(page, "out")
+                time.sleep(_TICK_DELAY_S)
+                if bot_name:
+                    recenter_via_leaderboard(page, bot_name)
+                    time.sleep(0.6)
+                img = grab()
+                new_frac = self_blob_frac(img, self_rgb)
+                if abs(new_frac - frac) < 1e-4:
+                    log("[camera] still stalled — stopping search")
+                    break
             frac = new_frac
             log(f"[camera] step {ticks} ({'IN' if delta < 0 else 'OUT'}): "
                 f"self={frac * 100:.2f}%")
@@ -288,6 +332,23 @@ def fix_camera(page, grab, self_rgb, bot_name: str | None = None,
                 log(f"[camera] clamp step ({'IN' if delta < 0 else 'OUT'}): "
                     f"self={frac * 100:.2f}%")
             log(f"[camera] after clamp: self={frac * 100:.2f}%")
+
+    # v3: trusted-button escape from EXTREME zoom (we're inside our own
+    # territory, giant name text on screen — wheel search can stall there).
+    img = grab()
+    frac = self_blob_frac(img, self_rgb)
+    btn = 0
+    while frac > TARGET_MAX and btn < 10:
+        _click_zoom(page, "out")
+        btn += 1
+        time.sleep(_TICK_DELAY_S)
+        img = grab()
+        frac = self_blob_frac(img, self_rgb)
+        log(f"[camera] button OUT {btn}: self={frac * 100:.2f}%")
+    if btn and bot_name:
+        recenter_via_leaderboard(page, bot_name)
+        time.sleep(0.6)
+        img = grab()
 
     if result is None:
         result = verify_view(img, self_rgb)

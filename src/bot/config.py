@@ -30,6 +30,10 @@ class Palette:
     territories on screen, and fill them in here.
     """
     self_color: PlayerColor = PlayerColor("me", 230, 80, 80)
+    # Lightened tints of self_color: the game renders OUR territory as a
+    # lighter shade of the leaderboard swatch (verified by eye 2026-08-08).
+    # These are ALSO "me", never enemies.
+    self_aliases: list = field(default_factory=list)
     enemy_colors: list[PlayerColor] = field(default_factory=lambda: [
         PlayerColor("blue", 70, 120, 240),
         PlayerColor("green", 70, 200, 120),
@@ -44,7 +48,7 @@ class Palette:
 
     @property
     def all_colors(self) -> list[PlayerColor]:
-        return [self.self_color, *self.enemy_colors]
+        return [self.self_color, *self.self_aliases, *self.enemy_colors]
 
 
 @dataclass

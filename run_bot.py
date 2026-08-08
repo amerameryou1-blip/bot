@@ -134,6 +134,8 @@ def discover_enemies(img, self_rgb, max_enemies=8):
     for c in saturated_colors(img, max_colors=40):
         if tuple(c) == tuple(self_rgb):
             continue
+        if sum(abs(int(a) - int(b)) for a, b in zip(c, self_rgb)) < 60:
+            continue  # antialiased shade of our own territory (v3.1)
         if any(np.all(np.abs(np.array(c) - np.array(d)) <= 24) for d in dom):
             continue  # terrain/UI
         b = blob(img, c, tol=20, min_area=15)
@@ -177,6 +179,36 @@ def feed_balances(page, planner, bot_name, palette=None) -> None:
                 enemy_balances[enemy.name] = float(balances[best_name])
         if enemy_balances:
             planner.set_enemy_balances(enemy_balances)
+
+
+def own_swatch_from_leaderboard(page):
+    """Read OUR row's color swatch straight off the leaderboard (user's trick).
+
+    No blob sanity filters — at match start the camera is zoomed into our
+    spawn, so our territory is large and touches frame edges; the strict
+    validator in calibration.py would reject the correct swatch there.
+    """
+    from bot.calibration import _ocr_words, swatch_from_strip
+    img = grab(page)
+    words = _ocr_words(img)
+    if not words:
+        return None
+    key = BOT_NAME.lower()[:6]
+    target = None
+    for w in words:
+        if key in w[0].lower():
+            target = w
+            break
+    if target is None:
+        return None
+    row = [w for w in words if abs(w[2] - target[2]) < 14]
+    lx = min(w[1] for w in row)
+    ly = min(w[2] for w in row)
+    lh = max(w[4] for w in row)
+    band = img[ly:ly + max(lh + 6, 12), max(0, lx - 60):max(0, lx - 2)]
+    if band.size == 0:
+        return None
+    return swatch_from_strip(band.reshape(-1, 3).astype(int), bright_min=100)
 
 
 def land_spots(img, n=10) -> list[tuple[int, int]]:
@@ -363,6 +395,33 @@ def main(record: bool = False, upload: bool = False,
             browser.close()
             sys.exit(1)
 
+        # v3.1 (2026-08-08, verified by eye): our leaderboard-row swatch is
+        # GROUND TRUTH. The spawn-blob diff latched onto pale sand terrain,
+        # and calibrate_from_leaderboard's blob sanity filter rejects the
+        # RIGHT swatch at start (zoomed-in camera -> big blob, edges touched).
+        # So read the swatch strip next to our OCR'd row directly.
+        self_aliases = []
+        try:
+            sw = own_swatch_from_leaderboard(page)
+            if sw is not None:
+                a = np.array(sw, dtype=int)
+                b = np.array(palette.self_color.rgb, dtype=int)
+                # the on-map lightened tint of our swatch (game renders our
+                # territory lighter) — counts as "me" in segment()
+                self_aliases = [PlayerColor(
+                    "me_lite", *[int(v + (255 - v) * 0.55) for v in a])]
+                if int(np.abs(a - b).sum()) > 90:
+                    log(f"[color] OVERRIDE spawn-blob {list(b)} -> "
+                        f"leaderboard swatch {list(a)}")
+                    palette = Palette(
+                        self_color=PlayerColor("me", int(a[0]), int(a[1]), int(a[2])),
+                        self_aliases=self_aliases,
+                        enemy_colors=[], tolerance=20.0, downscale=2)
+            else:
+                log("[color] no leaderboard swatch found — keeping spawn-blob color")
+        except Exception as e:
+            log(f"[color] swatch cross-check error: {e}")
+
         # 3.5) CAMERA FIX (the #1 blocker): the game spawns zoomed into our
         # territory. Zoom out via the game's own wheel path (synthetic
         # WheelEvent on canvasA) and verify numerically that our blob is
@@ -384,8 +443,8 @@ def main(record: bool = False, upload: bool = False,
         enemy_colors = discover_enemies(img, tuple(palette.self_color.rgb))
         log(f"discovered {len(enemy_colors)} enemy colors: "
             f"{[tuple(e.rgb) for e in enemy_colors]}")
-        palette = Palette(self_color=palette.self_color, enemy_colors=enemy_colors,
-                          tolerance=24.0, downscale=2)
+        palette = Palette(self_color=palette.self_color, self_aliases=self_aliases,
+                          enemy_colors=enemy_colors, tolerance=24.0, downscale=2)
 
         # 4) play with the trained combat brain
         planner = make_planner()
@@ -470,7 +529,8 @@ def main(record: bool = False, upload: bool = False,
                                 miss_counts[c] = 0
                         last_enemy_colors = now_colors
                         if en:
-                            palette = Palette(self_color=palette.self_color, enemy_colors=en,
+                            palette = Palette(self_color=palette.self_color,
+                                              self_aliases=self_aliases, enemy_colors=en,
                                               tolerance=24.0, downscale=2)
                     except Exception as e:
                         log(f"  rediscover err: {e}")

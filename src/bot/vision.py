@@ -109,13 +109,14 @@ def segment(frame: np.ndarray, palette: Palette) -> FrameState:
     h, w = labels.shape
     neutral_mask = labels == 0
 
-    # Self blob: label 1.
-    self_mask = labels == 1
+    # Self blob: label 1..n_self (self + lightened aliases).
+    n_self = 1 + len(getattr(palette, "self_aliases", []))
+    self_mask = (labels >= 1) & (labels <= n_self)
     self_blob = _blob_from_mask(self_mask, "me")
 
-    # Enemy blobs: labels 2..K.
+    # Enemy blobs: labels after the self aliases.
     enemies: list[Blob] = []
-    for idx in range(2, len(palette.all_colors) + 1):
+    for idx in range(n_self + 1, len(palette.all_colors) + 1):
         mask = labels == idx
         if mask.any():
             color = palette.all_colors[idx - 1]

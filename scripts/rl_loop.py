@@ -1,0 +1,297 @@
+#!/usr/bin/env python3
+"""Continuous sim-RL loop — HANDOFF §14 v1 (worker + trainer modes).
+
+The loop never stops between Kaggle session caps:
+  * WORKERS  play sim matches with the latest checkpoint (the stochastic
+    policy IS the exploration), push trajectory shards, pick up newer
+    checkpoints when they appear.
+  * TRAINER  pulls new shards -> PPO -> loud last-survivor eval -> pushes a
+    new checkpoint when it improves.
+
+Credential-optional: with HF_TOKEN everything syncs through
+amer224/territorial-bot-data (rl/shards/, rl/ckpt_*.pt, rl/best.json);
+without it the loop runs fully LOCAL (weights/nn/rl/) so the sandbox can
+develop and smoke-test it.
+
+Usage:
+  python3 scripts/rl_loop.py worker  [--hours 8] [--skill medium] [--n-bots 8]
+  python3 scripts/rl_loop.py trainer [--hours 8]
+Env: HF_TOKEN, EP_PER_SHARD (8), SHARD_SLEEP_S (20), TRAIN_EPOCHS (4),
+     SHIP_WR (0.30)
+"""
+import os
+import sys
+import time
+import json
+import argparse
+from pathlib import Path
+
+REPO = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(REPO / "src"))
+sys.path.insert(0, str(REPO / "scripts"))
+
+import numpy as np
+import torch
+
+import train_nn as T  # reuses _rollout_one / _train_ppo_batch / evaluate / net
+
+HF_DATASET = "amer224/territorial-bot-data"
+RL = T.WEIGHTS / "rl"
+SHARDS = RL / "shards"
+DONE = RL / "done"
+for d in (RL, SHARDS, DONE):
+    d.mkdir(parents=True, exist_ok=True)
+BEST_PT = RL / "best.pt"
+BEST_JSON = RL / "best.json"
+
+
+def log(msg):
+    print(f"[rl {time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+def _hf_api():
+    tok = os.environ.get("HF_TOKEN", "").strip()
+    if not tok:
+        return None, None
+    try:
+        from huggingface_hub import HfApi
+        return HfApi(token=tok), tok
+    except Exception as e:
+        log(f"HF unavailable ({str(e)[:80]}) — LOCAL mode")
+        return None, None
+
+
+# ------------------------------------------------------------ checkpoints ---
+def best_meta():
+    if BEST_JSON.exists():
+        try:
+            return json.load(open(BEST_JSON))
+        except Exception:
+            pass
+    return {"wr": -1.0, "rank": 99.0, "ts": 0, "source": "none"}
+
+
+def load_latest_net():
+    """Newest checkpoint: local best.pt -> HF rl/best.json+ckpt -> v14 seed."""
+    api, tok = _hf_api()
+    if api:
+        try:
+            remote = json.loads(api.hf_hub_download(
+                repo_id=HF_DATASET, repo_type="dataset",
+                filename="rl/best.json", token=tok))
+            local = best_meta()
+            if remote.get("ts", 0) > local.get("ts", 0):
+                p = api.hf_hub_download(repo_id=HF_DATASET, repo_type="dataset",
+                                        filename=f"rl/ckpt_{remote['ts']}.pt", token=tok)
+                log(f"pulled newer checkpoint ts={remote['ts']} wr={remote.get('wr')}")
+                net = T.make_net().to(T.DEVICE)
+                net.load_state_dict(torch.load(p, map_location=T.DEVICE))
+                return net, remote
+        except Exception as e:
+            log(f"checkpoint pull skipped ({str(e)[:60]})")
+    if BEST_PT.exists():
+        net = T.make_net().to(T.DEVICE)
+        net.load_state_dict(torch.load(BEST_PT, map_location=T.DEVICE))
+        return net, best_meta()
+    net = T.make_net().to(T.DEVICE)
+    T.load_model(net)  # weights/nn/model.pt (v14 seed checkpoint)
+    return net, best_meta()
+
+
+def save_checkpoint(net, wr, rank):
+    ts = int(time.time())
+    torch.save(net.state_dict(), BEST_PT)
+    torch.save(net.state_dict(), RL / f"ckpt_{ts}.pt")
+    meta = {"ts": ts, "wr": float(wr), "rank": float(rank), "source": "trainer"}
+    json.dump(meta, open(BEST_JSON, "w"), indent=2)
+    api, tok = _hf_api()
+    if api:
+        try:
+            api.upload_file(path_or_fileobj=str(RL / f"ckpt_{ts}.pt"),
+                            path_in_repo=f"rl/ckpt_{ts}.pt",
+                            repo_id=HF_DATASET, repo_type="dataset", token=tok)
+            api.upload_file(path_or_fileobj=str(BEST_JSON),
+                            path_in_repo="rl/best.json",
+                            repo_id=HF_DATASET, repo_type="dataset", token=tok)
+            log(f"checkpoint ts={ts} wr={wr:.2f} -> HF")
+        except Exception as e:
+            log(f"checkpoint HF upload failed ({str(e)[:60]}) — local only")
+    return ts
+
+
+# ------------------------------------------------------------------ shards ---
+def pack_episodes(episodes, seed0):
+    """uint8 rgb (v14 lesson: store small, divide at train time)."""
+    keys = ["rgb", "ctx", "kind", "cell", "pct", "logp", "reward", "alive"]
+    out = {k: [] for k in keys}
+    lens = []
+    for ep in episodes:
+        lens.append(len(ep["reward"]))
+        out["rgb"].append((np.asarray(ep["rgb"]) * 255).astype(np.uint8))
+        out["ctx"].append(np.asarray(ep["ctx"], dtype=np.float32))
+        out["kind"].append(np.asarray(ep["kind"], dtype=np.int64))
+        out["cell"].append(np.asarray(ep["cell"], dtype=np.int64))
+        out["pct"].append(np.asarray(ep["pct"], dtype=np.float32))
+        out["logp"].append(np.asarray(ep["logp"], dtype=np.float32))
+        out["reward"].append(np.asarray(ep["reward"], dtype=np.float32))
+        out["alive"].append(np.int64(1 if ep["alive"] else 0))
+    return {
+        "rgb": np.concatenate(out["rgb"]),
+        "ctx": np.concatenate(out["ctx"]),
+        "kind": np.concatenate(out["kind"]),
+        "cell": np.concatenate(out["cell"]),
+        "pct": np.concatenate(out["pct"]),
+        "logp": np.concatenate(out["logp"]),
+        "reward": np.concatenate(out["reward"]),
+        "alive": np.array(out["alive"], dtype=np.int64),
+        "lens": np.array(lens, dtype=np.int64),
+        "seed0": np.int64(seed0),
+    }
+
+
+def unpack_episodes(shard):
+    eps = []
+    off = 0
+    rgb = shard["rgb"]
+    if rgb.dtype != np.float32:
+        rgb = rgb.astype(np.float32) / 255.0
+    for i, L in enumerate(shard["lens"]):
+        eps.append({
+            "rgb": rgb[off:off + L],
+            "ctx": shard["ctx"][off:off + L],
+            "kind": shard["kind"][off:off + L],
+            "cell": shard["cell"][off:off + L],
+            "pct": shard["pct"][off:off + L],
+            "logp": shard["logp"][off:off + L],
+            "reward": shard["reward"][off:off + L],
+            "alive": bool(shard["alive"][i]),
+        })
+        off += L
+    return eps
+
+
+def push_shard(path: Path):
+    api, tok = _hf_api()
+    if not api:
+        return
+    try:
+        api.upload_file(path_or_fileobj=str(path),
+                        path_in_repo=f"rl/shards/{path.name}",
+                        repo_id=HF_DATASET, repo_type="dataset", token=tok)
+        log(f"shard {path.name} -> HF")
+    except Exception as e:
+        log(f"shard upload failed ({str(e)[:60]}) — kept local")
+
+
+# ------------------------------------------------------------------ worker ---
+def mode_worker(hours, skill, n_bots):
+    t_end = time.time() + hours * 3600
+    ep_per_shard = int(os.environ.get("EP_PER_SHARD", "8"))
+    sleep_s = float(os.environ.get("SHARD_SLEEP_S", "20"))
+    shard_i = 0
+    while time.time() < t_end:
+        net, meta = load_latest_net()
+        net.eval()
+        episodes, seed0 = [], int(time.time()) % 100000
+        for s in range(ep_per_shard):
+            episodes += T._rollout_one(net, seed0 + s * 7 + 1, skill, 1, n_bots=n_bots)
+        if not episodes:
+            log("no episodes collected — sleeping")
+            time.sleep(sleep_s)
+            continue
+        wins = 0
+        for ep in episodes:
+            if ep["alive"]:
+                wins += 1  # note: alive, not last-survivor (workers are cheap)
+        path = SHARDS / f"shard_rl_{int(time.time())}_{os.getpid()}_{shard_i}.npz"
+        np.savez_compressed(path, **pack_episodes(episodes, seed0))
+        shard_i += 1
+        log(f"worker shard {path.name}: {len(episodes)} episodes "
+            f"({sum(e['reward'].size for e in episodes)} steps) vs ckpt "
+            f"wr={meta.get('wr', -1):.2f} alive={wins}/{len(episodes)}")
+        push_shard(path)
+        time.sleep(sleep_s)
+    log("worker hours exhausted — exiting")
+
+
+# ----------------------------------------------------------------- trainer ---
+def mode_trainer(hours):
+    t_end = time.time() + hours * 3600
+    epochs = int(os.environ.get("TRAIN_EPOCHS", "4"))
+    ship_wr = float(os.environ.get("SHIP_WR", "0.30"))
+    api, tok = _hf_api()
+    best = best_meta()
+    # seed best wr from the loaded checkpoint if we have one
+    if best["wr"] < 0 and T.MODEL_PT.exists():
+        net = T.make_net().to(T.DEVICE)
+        T.load_model(net)
+        wr, rank = T.evaluate(net, seeds=6, silent=True)
+        best = {"ts": int(time.time()), "wr": wr, "rank": rank, "source": "v14-seed"}
+        json.dump(best, open(BEST_JSON, "w"), indent=2)
+        log(f"seeded best from v14 checkpoint: wr={wr:.2f} rank={rank:.2f}")
+    while time.time() < t_end:
+        # pull new HF shards
+        if api:
+            try:
+                files = api.list_repo_files(HF_DATASET, repo_type="dataset", token=tok)
+                new = [f for f in files
+                       if f.startswith("rl/shards/shard_rl_") and f.endswith(".npz")
+                       and not (SHARDS / Path(f).name).exists()
+                       and not (DONE / Path(f).name).exists()]
+                for f in new[:8]:
+                    p = api.hf_hub_download(repo_id=HF_DATASET, repo_type="dataset",
+                                            filename=f, token=tok)
+                    os.replace(p, SHARDS / Path(f).name)
+                if new:
+                    log(f"pulled {len(new)} new shards from HF")
+            except Exception as e:
+                log(f"shard pull skipped ({str(e)[:60]})")
+        pending = sorted(SHARDS.glob("shard_*.npz"))
+        if not pending:
+            time.sleep(30)
+            continue
+        episodes = []
+        for p in pending:
+            try:
+                episodes += unpack_episodes(np.load(p))
+            except Exception as e:
+                log(f"bad shard {p.name}: {e}")
+        if not episodes:
+            for p in pending:
+                p.rename(DONE / p.name)
+            continue
+        net, _ = load_latest_net()
+        opt = torch.optim.Adam(net.parameters(), lr=1e-4)
+        loss = T._train_ppo_batch(net, opt, episodes, epochs=epochs)
+        wr, rank = T.evaluate(net, seeds=6, silent=True)
+        msg = (f"trainer iter: shards={len(pending)} episodes={len(episodes)} "
+               f"loss={loss:.3f} | LAST-SURVIVOR wr={wr:.2f} rank={rank:.2f} "
+               f"(best {best['wr']:.2f})")
+        if wr >= best["wr"]:
+            ts = save_checkpoint(net, wr, rank)
+            best = {"ts": ts, "wr": wr, "rank": rank, "source": "trainer"}
+            msg += f" -> NEW BEST ts={ts}"
+            if wr >= ship_wr:
+                msg += f" | SHIP GATE (>= {ship_wr}) REACHED"
+        log(msg)
+        for p in pending:
+            p.rename(DONE / p.name)
+    log("trainer hours exhausted — exiting")
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("mode", choices=["worker", "trainer"])
+    ap.add_argument("--hours", type=float, default=8)
+    ap.add_argument("--skill", default="medium")
+    ap.add_argument("--n-bots", type=int, default=8)
+    a = ap.parse_args()
+    log(f"LOOP {a.mode} hours={a.hours} device={T.DEVICE}")
+    if a.mode == "worker":
+        mode_worker(a.hours, a.skill, a.n_bots)
+    else:
+        mode_trainer(a.hours)
+
+
+if __name__ == "__main__":
+    main()
