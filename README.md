@@ -48,6 +48,12 @@ must WIN AS **LAST SURVIVOR** (by elimination — NOT biggest area).
 > - 🔁 Resume recipe (any session): setup §6 → `scripts/watchdog_loop.py
 >   --relaunch` (restarts dead kernels AND ferries recordings) → watch
 >   `rl/best.json` wr trend toward the ≥0.30 ship gate.
+> - 🔋 **CPU-ONLY FLEET (user decision 2026-08-08, 22:30):** GPU 30h/week
+>   reserved for final pushes. Fleet = 4 CPU workers + `rl-loop-trainer-cpu`
+>   + `bot-train-cpu` (v15 real-data pipeline). Kaggle kernels remember GPU
+>   at creation → CPU re-pushes need FRESH slugs (bot-train-nn /
+>   rl-loop-trainer-gpu retired, cancelled by user). Checkpoints + shards +
+>   recordings persist on HF; seed model committed to git.
 
 ---|---------|-----|------|--------|--------|----------|---------|----------------|
 | 1 | 20260807-202555-355808 | Island | 1 | 120 | 120 | FAIL | 4 | no |
