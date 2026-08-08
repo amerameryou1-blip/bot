@@ -376,7 +376,11 @@ def _train_ppo_batch(net, opt, episodes, epochs=4, gamma=0.99, lam=0.95, clip=0.
     return tot_loss / max(nb, 1)
 
 
-def stage_real(net, epochs=10, bs=128, lr=5e-5):
+# ============================================================ real data ====
+REAL_NPZ = WEIGHTS / "real_vision.npz"
+
+
+def stage_real(net, epochs=12, bs=128, lr=3e-5):
     """Fine-tune vision (segmentation) + click head on REAL frames.
 
     Real data comes from scripts/label_real.py (recordings + screenshots):
@@ -417,36 +421,76 @@ def stage_real(net, epochs=10, bs=128, lr=5e-5):
         return {c: (correct[c] / total[c] if total[c] else float("nan")) for c in range(5)}
 
     opt = torch.optim.Adam(net.parameters(), lr=lr)
+<<<<<<< HEAD
     # sqrt-inverse-frequency class weights (standard for imbalanced seg):
     # w_c = 1/sqrt(freq_c), then scaled so the MAX weight is 1 and floored at
     # 0.05. Less extreme than 1/freq — keeps water/neutral/ui learnable while
     # still upweighting the rare me/enemy classes.
+=======
+    # v14 class weights: sqrt-inverse-frequency, CAPPED [0.2, 0.8].
+    # v13 ran the old 1/freq weights [0.2,0.2,1.0,0.2,0.2] — me=1.0 starved
+    # water/enemy/ui at 0.2 -> me-overfit, water/enemy never learned.
+>>>>>>> 0660a47 (v14 real stage: FIX uint8->float bug (d[rgb] 0-255 vs sim 0-1 wrecked transfer); capped sqrt-inverse weights [0.2,0.8]; cosine LR 3e-5->3e-6; sim-mixing every 2nd batch; rare-class frame oversampling; 12 epochs)
     dist = np.bincount(d["labels"].ravel(), minlength=5).astype(np.float64)
     dist = np.clip(dist, 1, None)
     freq = dist / dist.sum()
     inv = 1.0 / np.sqrt(freq)
     inv = inv / inv.max()
+<<<<<<< HEAD
     inv = np.clip(inv, 0.05, 1.0)
     class_w = torch.tensor(inv, dtype=torch.float32, device=DEVICE)
     print(f"[real] sqrt-inverse-freq class weights: {[round(float(w), 3) for w in inv]}", flush=True)
+=======
+    inv = np.clip(inv, 0.2, 0.8)
+    class_w = torch.tensor(inv, dtype=torch.float32, device=DEVICE)
+    print(f"[real] sqrt-inverse-freq class weights (capped 0.2-0.8): {[round(float(w), 3) for w in inv]}", flush=True)
+
+    # rare-class frame oversampling: frames with me/enemy pixels sampled more
+    me_cnt = (d["labels"] == 2).sum(axis=(1, 2)).astype(np.float64)
+    en_cnt = (d["labels"] == 3).sum(axis=(1, 2)).astype(np.float64)
+    frame_w = 1.0 + 4.0 * me_cnt / 128.0 + 1.5 * en_cnt / 128.0
+    frame_w = frame_w / frame_w.mean()
+
+    # sim mixing: every 2nd batch comes from the sim dataset (mmap) so the
+    # backbone doesn't forget the sim domain it was pretrained on
+    sim = None
+    if DATASET.exists():
+        try:
+            sim = np.load(DATASET, mmap_mode="r")
+            print(f"[real] sim mixing on: {len(sim['rgb'])} sim frames", flush=True)
+        except Exception as e:
+            print(f"[real] sim mixing unavailable: {e}", flush=True)
+    n_sim = len(sim["rgb"]) if sim is not None else 0
+
+    import math
+    lr_min = lr * 0.1
+>>>>>>> 0660a47 (v14 real stage: FIX uint8->float bug (d[rgb] 0-255 vs sim 0-1 wrecked transfer); capped sqrt-inverse weights [0.2,0.8]; cosine LR 3e-5->3e-6; sim-mixing every 2nd batch; rare-class frame oversampling; 12 epochs)
     for ep in range(epochs):
+        lr_t = lr_min + 0.5 * (lr - lr_min) * (1 + math.cos(math.pi * ep / max(epochs, 1)))
+        opt.param_groups[0]["lr"] = lr_t
         net.train()
         tot, nb = 0.0, 0
-        order = np.random.permutation(tr_i)
+        order = np.random.choice(len(tr_i), size=len(tr_i),
+                                 p=frame_w[tr_i] / frame_w[tr_i].sum())
         for i in range(0, len(order), bs):
-            ii = order[i:i+bs]
-            xb = torch.tensor(d["rgb"][ii].transpose(0, 3, 1, 2), dtype=torch.float32, device=DEVICE)
-            lb = torch.tensor(d["labels"][ii], dtype=torch.int64, device=DEVICE)
+            ii = order[i:i + bs]
+            if sim is not None and n_sim and (nb % 2) == 1:
+                # sim batch (already 0..1, NCHW)
+                si = np.random.randint(0, n_sim, size=len(ii))
+                xb = torch.tensor(sim["rgb"][si], dtype=torch.float32, device=DEVICE)
+                lb = torch.tensor(sim["seg"][si], dtype=torch.int64, device=DEVICE)
+            else:
+                # real batch — MUST be the /255 normalized rgb_all (the old
+                # d["rgb"] uint8 0..255 wrecked transfer from the sim stage)
+                xb = torch.tensor(rgb_all[ii].transpose(0, 3, 1, 2), dtype=torch.float32, device=DEVICE)
+                lb = torch.tensor(d["labels"][ii], dtype=torch.int64, device=DEVICE)
             seg, _, click, kind, pct, _ = net.forward(xb, None, return_all=True)
             lb_g = F.interpolate(lb.float().unsqueeze(1), size=(GRID, GRID), mode="nearest").long().squeeze(1)
             loss = F.cross_entropy(seg, lb_g, weight=class_w)
-            if has_clicks and len(ii) > 0:
-                # align click labels only for frames that HAVE them (sparse)
-                pass
             opt.zero_grad(); loss.backward(); opt.step()
             tot += loss.item(); nb += 1
         acc = classify_acc(net, val_i)
-        print(f"[real] epoch {ep + 1}: seg_loss={tot / max(nb, 1):.4f} | "
+        print(f"[real] epoch {ep + 1} (lr={lr_t:.2e}): seg_loss={tot / max(nb, 1):.4f} | "
               f"water={acc[0]:.2f} neutral={acc[1]:.2f} me={acc[2]:.2f} enemy={acc[3]:.2f} ui={acc[4]:.2f}",
               flush=True)
 
