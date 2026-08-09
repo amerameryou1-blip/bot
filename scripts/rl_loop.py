@@ -307,6 +307,11 @@ def mode_trainer(hours):
             for p in pending:
                 p.rename(DONE / p.name)
             continue
+        # cap the PPO batch: 2M-param PPO is heavy on CPU; more iterations
+        # with fresher data beats giant slow ones (measured 2026-08-09)
+        if len(episodes) > 24:
+            idx = np.random.choice(len(episodes), 24, replace=False)
+            episodes = [episodes[i] for i in sorted(idx)]
         net, _ = load_latest_net()
         opt = T.make_optimizer(net)   # Muon+AdamW hybrid, NaN-watchdogged
         log(f"[hb] training on {len(episodes)} episodes "
