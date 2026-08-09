@@ -45,6 +45,26 @@ def push_trainer_best_effort():
         print(f"trainer push err: {e}", flush=True)
 
 
+def tidy_old_shards():
+    """Delete the 6 old root filler shards once HF's 128-commits/h budget
+    allows (idempotent; silently retries every watchdog cycle)."""
+    try:
+        from huggingface_hub import HfApi
+        tok = os.environ.get("HF_TOKEN", "").strip()
+        if not tok:
+            return
+        api = HfApi(token=tok)
+        fs = api.list_repo_files("amer224/territorial-bot-data", repo_type="dataset")
+        old = [f for f in fs if f.startswith("shard_") and f.endswith(".npz")]
+        for f in old:
+            api.delete_file(path_in_repo=f, repo_id="amer224/territorial-bot-data",
+                            repo_type="dataset", token=tok)
+        if old:
+            print(f"tidied {len(old)} old used shards", flush=True)
+    except Exception as e:
+        print(f"tidy skipped (budget?): {str(e)[:60]}", flush=True)
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--relaunch", action="store_true",
@@ -57,6 +77,7 @@ def main():
         if not any(x in s for x in ALIVE):
             dead.append(k)
     push_trainer_best_effort()
+    tidy_old_shards()
     if a.relaunch and dead:
         # a CPU slot just freed -> ferry any recordings zips waiting on GH
         try:
