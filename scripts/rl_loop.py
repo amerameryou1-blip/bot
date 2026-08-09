@@ -50,6 +50,29 @@ def log(msg):
     print(f"[rl {time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+def _hb(phase, t_it=None, **extra):
+    """v6 telemetry: heartbeat with PHASE per sub-step, 3 upload attempts
+    with backoff. If the trainer ever hangs, the LAST phase tells where."""
+    payload = {"ts": int(time.time()), "phase": phase}
+    if t_it is not None:
+        payload["iter_s"] = int(time.time() - t_it)
+    payload.update(extra)
+    for attempt in range(3):
+        try:
+            api_h, tok_h = _hf_api()
+            if not api_h:
+                return
+            hb = RL / "hb.json"
+            json.dump(payload, open(hb, "w"))
+            api_h.upload_file(path_or_fileobj=str(hb),
+                              path_in_repo="rl/trainer_heartbeat.json",
+                              repo_id=HF_DATASET, repo_type="dataset", token=tok_h)
+            return
+        except Exception:
+            time.sleep(15 * (attempt + 1))
+    log(f"[hb] phase={phase} upload failed 3x")
+
+
 def _hf_api():
     tok = os.environ.get("HF_TOKEN", "").strip()
     if not tok:
@@ -277,19 +300,8 @@ def mode_trainer(hours):
         log(f"seeded best from v14 checkpoint: wr={wr:.2f} rank={rank:.2f}")
     while time.time() < t_end:
         t_it = time.time()
-        # boot/iter heartbeat FIRST, before any heavy work, so liveness is
-        # visible from outside within minutes of (re)start
-        try:
-            api_h, tok_h = _hf_api()
-            if api_h:
-                hb = RL / "hb.json"
-                json.dump({"ts": int(time.time()), "phase": "iter_start",
-                           "iter_s": 0}, open(hb, "w"))
-                api_h.upload_file(path_or_fileobj=str(hb),
-                                  path_in_repo="rl/trainer_heartbeat.json",
-                                  repo_id=HF_DATASET, repo_type="dataset", token=tok_h)
-        except Exception as e:
-            log(f"[hb] upload skipped ({str(e)[:50]})")
+        # heartbeat FIRST, before any heavy work (v6)
+        _hb("iter_start", t_it)
         log(f"[hb] iter start (pending local={len(list(SHARDS.glob('shard_*.npz')))})")
         if api:
             try:
@@ -331,6 +343,7 @@ def mode_trainer(hours):
             episodes = [episodes[i] for i in sorted(idx)]
         net, _ = load_latest_net()
         opt = T.make_optimizer(net)   # Muon+AdamW hybrid, NaN-watchdogged
+        _hb("training", t_it, eps=len(episodes))
         log(f"[hb] training on {len(episodes)} episodes "
             f"({time.time()-t_it:.0f}s since iter start)")
         loss = T._train_ppo_batch(net, opt, episodes, epochs=epochs)
@@ -348,34 +361,31 @@ def mode_trainer(hours):
             if wr >= ship_wr:
                 msg += f" | SHIP GATE (>= {ship_wr}) REACHED"
         log(msg)
-        # telemetry heartbeat: tiny file, one commit per iteration, so the
-        # trainer is observable from outside (learned 2026-08-09 the hard way)
-        try:
-            api_h, tok_h = _hf_api()
-            if api_h:
-                hb = RL / "hb.json"
-                json.dump({"ts": int(time.time()), "iter_s": int(time.time() - t_it),
-                           "loss": round(float(loss), 4), "wr": round(float(wr), 3),
-                           "rank": round(float(rank), 2), "shards": len(pending)},
-                          open(hb, "w"))
-                api_h.upload_file(path_or_fileobj=str(hb),
-                                  path_in_repo="rl/trainer_heartbeat.json",
-                                  repo_id=HF_DATASET, repo_type="dataset", token=tok_h)
-        except Exception as e:
-            log(f"[hb] upload skipped ({str(e)[:50]})")
+        _hb("iter_done", t_it, loss=round(float(loss), 4),
+            wr=round(float(wr), 3), rank=round(float(rank), 2),
+            shards=len(pending))
+        consumed = [p.name for p in pending]
         for p in pending:
             p.rename(DONE / p.name)
         # storage hygiene (user 2026-08-08): experience is now IN the weights —
-        # delete consumed shards from HF in ONE commit so the repo stays lean
+        # delete consumed shards from HF in ONE commit so the repo stays lean.
+        # (DeleteFiles was renamed across hub versions — detect defensively.)
         try:
             api_del, tok_del = _hf_api()
             if api_del:
-                from huggingface_hub import DeleteFiles
-                api_del.create_commit(
-                    repo_id=HF_DATASET, repo_type="dataset", token=tok_del,
-                    commit_message="consume shards",
-                    operations=[DeleteFiles(path_in_repo=f"rl/shards/{p.name}")
-                                for p in pending])
+                import huggingface_hub as _h
+                op = None
+                for nm in ("DeleteFiles", "CommitOperationDelete",
+                           "CommitOperationDeleteFile"):
+                    if hasattr(_h, nm):
+                        op = getattr(_h, nm)
+                        break
+                if op:
+                    api_del.create_commit(
+                        repo_id=HF_DATASET, repo_type="dataset", token=tok_del,
+                        commit_message="consume shards",
+                        operations=[op(path_in_repo=f"rl/shards/{n}")
+                                    for n in consumed])
         except Exception as e:
             log(f"shard delete commit failed ({str(e)[:60]})")
     log("trainer hours exhausted — exiting")
