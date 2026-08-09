@@ -80,12 +80,17 @@ def _box_mean(a: np.ndarray, k: int = 3) -> np.ndarray:
     return out
 
 
-def classify(rgb: np.ndarray, gray_is_mountain: bool = False) -> np.ndarray:
+def classify(rgb: np.ndarray, gray_is_mountain: bool = False,
+             flat_t: float = 2.0, water_m: int = 10, green_m: int = 5) -> np.ndarray:
     """int8: -2 mountain, -1 water, 0 land, -9 UI/unknown.
-    v4: neutral-gray pixels inside the map are LAND by default (they form the
-    landmasses of world/caucasia/mare_nostrum/scandinavia...). On maps whose
-    OCR stats report mountains (mountains/cliffs/halo/mountains2) the caller
-    passes gray_is_mountain=True so gray = rock."""
+
+    v4 (2026-08-09, tuned by EYES on World1/Mountains1/Europe):
+      * page background = PERFECTLY FLAT gray -> variance test -> UI
+      * mountain maps: rock+snow = everything not green and not blue
+        (snow is WHITE — the old light_land rule was eating it as land)
+      * normal maps: gray/beige/white = land (world/caucasia/white_plains)
+      * water_m/green_m/flat_t are per-map knobs, auto-calibrated against
+        the OCR percentages the game prints on the screenshot."""
     r = rgb[..., 0].astype(np.float32)
     g = rgb[..., 1].astype(np.float32)
     b = rgb[..., 2].astype(np.float32)
@@ -96,32 +101,51 @@ def classify(rgb: np.ndarray, gray_is_mountain: bool = False) -> np.ndarray:
     chroma = mx - mn
     total = r + g + b
 
-    # dark UI / dark neutral UI (tile borders, panels; but not dark GREEN land,
-    # not dark navy water)
+    lum = total / 3.0
+    m1 = _box_mean(lum, 3)
+    m2 = _box_mean(lum * lum, 3)
+    flat = (m2 - m1 * m1) < flat_t
+    bg = flat   # v4b reverted: mid-gray window ate real gray land
+
     dark_ui = (total < 90) & ~((g > r + 5) & (g > b + 5)) & ~((b > r + 10) & (b > g + 5))
 
-    # water: blue-dominant (covers bright blue AND dark navy)
-    water = (b > r + 10) & (b > g + 5) & (b >= 40) & ~dark_ui
-
-    # land: green (covers dark green + vivid green)
-    green = (g > r + 5) & (g > b + 5) & (g > 30)
-    # land: warm/chroma land — tan, warm-gray-beige, near-white cliff rock
-    chroma_land = (chroma >= 12) & (r >= g) & (g >= b) & (r > 85)
-    light_land = (total >= 640) & (chroma < 14)  # White Plains etc: white tiles
-    land = green | chroma_land | light_land
+    water = (b > r + water_m) & (b > g + (water_m // 2 + 2)) & (b >= 40) & ~dark_ui
+    green = (g > r + green_m) & (g > b + green_m) & (g > 30)
 
     out[water] = -1
-    out[land] = 0
-    out[land & (chroma < 12)] = 0  # (no-op, keeps land regardless)
-    # everything else with real brightness that is neutral-gray = mountain
-    # (only meaningful INSIDE the rect; UI panels are excluded by rect finding)
-    neutral = (chroma < 12)
     if gray_is_mountain:
-        mountain = neutral & ~dark_ui & (total >= 45) & (mx < 230) & ~water
+        # rock + snow = not water, not green, not UI-dark, not page bg
+        mountain = ~water & ~green & ~dark_ui & ~bg & (total >= 45)
         out[mountain] = -2
+        out[green] = 0
     else:
-        out[neutral & ~dark_ui & (total >= 45) & (mx < 230) & ~water] = 0  # gray land
+        chroma_land = (chroma >= 12) & (r >= g) & (g >= b) & (r > 85)
+        light_land = (total >= 640) & (chroma < 14)
+        gray_land = (chroma < 12) & ~dark_ui & ~bg & (total >= 45) & (mx < 230)
+        out[green | chroma_land | light_land | gray_land] = 0
     return out
+
+
+def calibrate(rgb: np.ndarray, expect: dict, aspect: float):
+    """Search (flat_t, water_m, green_m) so extracted stats match the OCR
+    percentages printed on the screenshot. Returns (knobs, cls) best fit."""
+    gim = expect.get("mountain", 0.0) > 5.0
+    best = None
+    for flat_t in (0.5, 1.0, 2.0, 4.0):
+        for water_m in (5, 10, 16):
+            for green_m in (3, 5, 8):
+                cls = classify(rgb, gray_is_mountain=gim, flat_t=flat_t,
+                               water_m=water_m, green_m=green_m)
+                rect = map_rect(cls, aspect=aspect)
+                if rect is None:
+                    continue
+                y0, y1, x0, x1 = _snap(rect, cls.shape, aspect)
+                st = stats_of(cls[y0:y1 + 1, x0:x1 + 1])
+                err = sum(abs(st.get(k, 0) - expect.get(k, 0))
+                          for k in ("land", "water", "mountain") if k in expect)
+                if best is None or err < best[0]:
+                    best = (err, (flat_t, water_m, green_m), cls)
+    return best
 
 
 def map_rect(cls: np.ndarray, aspect: float | None = None) -> tuple:
@@ -133,7 +157,7 @@ def map_rect(cls: np.ndarray, aspect: float | None = None) -> tuple:
     panels that overlay the map's edges. Falls back to row/col projection.
     """
     H, W = cls.shape
-    is_map = (cls == -1) | (cls == 0)
+    is_map = cls != -9   # water OR land OR mountain (v4: mountains count!)
     if aspect is not None and 0.5 < aspect < 3.5:
         # Water exists ONLY on the map -> the map rect must CONTAIN the water
         # bbox. Then snap to the real aspect (vertically centered) and pick
@@ -146,11 +170,14 @@ def map_rect(cls: np.ndarray, aspect: float | None = None) -> tuple:
         else:
             wb = None
         best = None
-        for frac_h in np.linspace(0.45, 0.99, 28):
+        for frac_h in np.linspace(0.45, 1.0, 32):
             h = int(H * frac_h)
             w = int(h * aspect)
-            if w <= 10 or w >= W:
+            if w <= 10:
                 continue
+            # wide real maps (world/mare_nostrum/...) fill the ENTIRE screen
+            # width — clamp instead of skipping (v3 fix, 2026-08-09)
+            w = min(w, W - 1)
             y0 = (H - h) // 2
             y1 = min(H, y0 + h)
             if wb is not None:
@@ -186,6 +213,23 @@ def map_rect(cls: np.ndarray, aspect: float | None = None) -> tuple:
     return int(rows.min()), int(rows.max()), int(cols.min()), int(cols.max())
 
 
+def _snap(rect, shape, real_aspect):
+    """Trim a rect to the real map aspect ratio (centered)."""
+    y0, y1, x0, x1 = rect
+    ch = y1 - y0 + 1
+    cw = x1 - x0 + 1
+    cur_aspect = cw / ch
+    if cur_aspect > real_aspect:          # too wide -> trim columns
+        cw_t = int(round(ch * real_aspect))
+        cx0 = x0 + (cw - cw_t) // 2
+        x0, x1 = max(0, cx0), min(shape[1] - 1, cx0 + cw_t)
+    else:                                  # too tall -> trim rows
+        ch_t = int(round(cw / real_aspect))
+        cy0 = y0 + (ch - ch_t) // 2
+        y0, y1 = max(0, cy0), min(shape[0] - 1, cy0 + ch_t)
+    return y0, y1, x0, x1
+
+
 def stats_of(cls: np.ndarray) -> dict:
     valid = cls >= -2
     n = int(valid.sum())
@@ -199,7 +243,9 @@ def stats_of(cls: np.ndarray) -> dict:
 
 
 def block_majority(cls: np.ndarray, tw: int, th: int) -> np.ndarray:
-    """Downsample to (th, tw) by MAJORITY class per block (UI -9 -> land 0)."""
+    """Downsample to (th, tw) by MAJORITY class per block.
+    v4: UI/background (-9) becomes MOUNTAIN (-2, impassable) — the page
+    background around real maps must block movement, not be free land."""
     H, W = cls.shape
     out = np.zeros((th, tw), dtype=np.int8)
     for yy in range(th):
@@ -209,7 +255,7 @@ def block_majority(cls: np.ndarray, tw: int, th: int) -> np.ndarray:
             block = cls[y0:y1, x0:x1]
             vals, counts = np.unique(block, return_counts=True)
             best = vals[int(np.argmax(counts))]
-            out[yy, xx] = best if best != -9 else 0
+            out[yy, xx] = best if best != -9 else -2
     return out
 
 
@@ -231,29 +277,23 @@ def main() -> int:
             print(f"[{slug:16s}] SKIP: missing {src.name}")
             continue
         rgb = np.asarray(Image.open(src).convert('RGB'))
-        gray_is_mountain = expect.get("mountain", 0.0) > 5.0  # OCR decides
-        cls = classify(rgb, gray_is_mountain=gray_is_mountain)
-
-        rect = map_rect(cls, aspect=rw / rh)
+        aspect = rw / rh
+        if expect:
+            fit = calibrate(rgb, expect, aspect)
+            if fit is None:
+                print(f"[{slug:16s}] FAIL: no map rect")
+                failures += 1
+                continue
+            err, knobs, cls = fit
+        else:
+            knobs = None
+            cls = classify(rgb, gray_is_mountain=expect.get("mountain", 0.0) > 5.0)
+        rect = map_rect(cls, aspect=aspect)
         if rect is None:
             print(f"[{slug:16s}] FAIL: no map rect")
             failures += 1
             continue
-        y0, y1, x0, x1 = rect
-        # snap the rect to the REAL map aspect ratio (maps that fill the
-        # screen width get trimmed; maps boxed in by panels stay ~right)
-        ch = y1 - y0 + 1
-        cw = x1 - x0 + 1
-        real_aspect = rw / rh
-        cur_aspect = cw / ch
-        if cur_aspect > real_aspect:          # too wide -> trim columns
-            cw_t = int(round(ch * real_aspect))
-            cx0 = x0 + (cw - cw_t) // 2
-            x0, x1 = max(0, cx0), min(cls.shape[1] - 1, cx0 + cw_t)
-        else:                                  # too tall -> trim rows
-            ch_t = int(round(cw / real_aspect))
-            cy0 = y0 + (ch - ch_t) // 2
-            y0, y1 = max(0, cy0), min(cls.shape[0] - 1, cy0 + ch_t)
+        y0, y1, x0, x1 = _snap(rect, cls.shape, aspect)
         crop = cls[y0:y1 + 1, x0:x1 + 1]
         ch, cw = crop.shape
 
