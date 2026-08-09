@@ -91,6 +91,11 @@ def main():
         import launch_loop_kernels as L
         hf = os.environ.get("HF_TOKEN", "").strip()
         for k in dead:
+            # v1 pool is SATURATED (20GB) — retired 2026-08-09 by user decision;
+            # its slots now belong to v2 producers. Status still monitored.
+            if k.startswith("rl-loop-worker-"):
+                print(f"{k}: dead, NOT relaunching (v1 retired)", flush=True)
+                continue
             if k == "rl-loop-trainer-cpu":
                 code = (L.TRAINER_BOOT.replace("@@HF@@", hf)
                         .replace("@@REPO@@", L.GH_REPO_URL)

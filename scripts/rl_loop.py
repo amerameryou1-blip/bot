@@ -501,7 +501,9 @@ def mode_worker_v2(hours):
                 if len(rec["reward"]) >= 250:
                     break
             rec["alive"] = bool(game.players[1].alive)
-            if len(rec["reward"]) >= 3:
+            # quality filter (user-approved 2026-08-09): degenerate episodes
+            # (instant deaths / no real play) are noise, not data
+            if len(rec["reward"]) >= 10:
                 episodes.append(rec)
         if not episodes:
             time.sleep(10)
