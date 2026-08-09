@@ -23,6 +23,7 @@ import os
 import sys
 import time
 import json
+import shutil
 import argparse
 from pathlib import Path
 
@@ -300,7 +301,10 @@ def mode_trainer(hours):
                 for f in new[:8]:
                     p = api.hf_hub_download(repo_id=HF_DATASET, repo_type="dataset",
                                             filename=f, token=tok)
-                    os.replace(p, SHARDS / Path(f).name)
+                    # shutil.move: os.replace fails cross-device on Kaggle
+                    # (cache on /root, working dir on /kaggle) — the bug that
+                    # spun the trainer idle for hours (found 2026-08-09)
+                    shutil.move(p, str(SHARDS / Path(f).name))
                 if new:
                     log(f"pulled {len(new)} new shards from HF")
             except Exception as e:
