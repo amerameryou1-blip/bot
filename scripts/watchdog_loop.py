@@ -16,7 +16,7 @@ import argparse
 # (Kaggle enforces it server-side; stay AT it, never over — user TOS check
 # 2026-08-08: CPU batch cap 5, GPU cap 2, separate pools)
 KERNELS = ([f"rl-loop-worker-{i}" for i in range(1, 4)]
-           + [f"rl-v2-worker-{i}" for i in (1, 2)]
+           + [f"rl-v2-worker-{i}" for i in (1, 2, 3)]
            + ["rl-loop-trainer-cpu"])
 ALIVE = ("RUNNING", "QUEUED")
 
