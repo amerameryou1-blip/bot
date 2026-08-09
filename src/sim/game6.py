@@ -232,6 +232,56 @@ class ClickSim6:
             labels = np.array(Image.fromarray(labels.astype(np.uint8)).resize((size, size), Image.NEAREST))
         return rgb, labels
 
+    # ---- v2 pipeline (2026-08-09): rich inputs for the 100M teacher ----
+
+    def render_fast(self, pid: int = 1):
+        """Vectorized full-res rgb+labels (no python loop)."""
+        w = self.world
+        rgb = np.zeros((w.shape[0], w.shape[1], 3), dtype=np.uint8)
+        labels = np.zeros(w.shape, dtype=np.int64)
+        water = w < 0
+        land = w == 0
+        me = w == pid
+        rgb[water] = (40, 90, 170)
+        rgb[land] = (150, 142, 120)
+        rgb[me] = (220, 60, 60)
+        labels[water] = 0
+        labels[land] = 1
+        labels[me] = 2
+        labels[~(water | land | me)] = 3
+        for v in np.unique(w[~(water | land | me)]):
+            rgb[w == v] = self.enemy_colors.get(int(v), (200, 60, 200))
+        return rgb, labels
+
+    def numeric_ctx(self, pid: int = 1) -> np.ndarray:
+        """The 8 numbers a human reads off the leaderboard (v2 context)."""
+        N = self.h * self.w
+        areas = {p: int((self.world == p).sum()) for p in self._pids
+                 if self.players[p].alive}
+        me_a = areas.get(pid, 0)
+        others = sorted((a for p, a in areas.items() if p != pid), reverse=True)
+        bal = self.players[pid].troops.balance
+        dens = bal / max(me_a, 1)
+        return np.array([
+            np.log1p(bal) / 12.0,
+            me_a / N,
+            1.0 if dens >= 90 else 0.0,
+            (others[0] / N) if len(others) > 0 else 0.0,
+            (others[1] / N) if len(others) > 1 else 0.0,
+            self.tick / max(self.max_ticks, 1),
+            np.log1p(me_a) / 12.0,
+            self.players[pid].kills / 20.0,
+        ], dtype=np.float32)
+
+    def frame_bundle(self, pid: int = 1, size: int = 128, prev=None):
+        """(rgb size×size uint8, labels size×size, nums8, diff-ready prev)."""
+        from PIL import Image
+        rgb, labels = self.render_fast(pid)
+        rgb_s = np.array(Image.fromarray(rgb).resize((size, size), Image.BILINEAR))
+        lab_s = np.array(Image.fromarray(labels.astype(np.uint8)).resize(
+            (size, size), Image.NEAREST)).astype(np.int64)
+        return rgb_s, lab_s, self.numeric_ctx(pid)
+
     # -- stepping ------------------------------------------------------------
 
     def step(self, actions: dict[int, list[tuple[str, int, int, float]]]):

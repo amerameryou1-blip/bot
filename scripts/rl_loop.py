@@ -400,9 +400,127 @@ def main():
     a = ap.parse_args()
     log(f"LOOP {a.mode} hours={a.hours} device={T.DEVICE}")
     if a.mode == "worker":
-        mode_worker(a.hours, a.skill, a.n_bots)
+        if os.environ.get("V2") == "1":
+            mode_worker_v2(a.hours)
+        else:
+            mode_worker(a.hours, a.skill, a.n_bots)
     else:
         mode_trainer(a.hours)
+
+
+
+
+# ================= v2 pipeline (128px + diff + numbers) =====================
+SHARDS_V2 = RL / "shards_v2"
+DONE_V2 = RL / "done_v2"
+for d in (SHARDS_V2, DONE_V2):
+    d.mkdir(parents=True, exist_ok=True)
+
+
+def _cell_of(act, grid=16):
+    if act.kind == "bank" or act.x is None:
+        return 0
+    cx = min(grid - 1, max(0, int(act.x / 200 * grid)))   # sim world is 200x200
+    cy = min(grid - 1, max(0, int(act.y / 200 * grid)))
+    return cy * grid + cx
+
+
+def pack_v2(rec):
+    return dict(
+        rgb=np.stack(rec["rgb"]).astype(np.uint8),
+        lab=np.stack(rec["lab"]).astype(np.uint8),
+        nums=np.stack(rec["nums"]).astype(np.float32),
+        kind=np.array(rec["kind"], dtype=np.int64),
+        cell=np.array(rec["cell"], dtype=np.int64),
+        pct=np.array(rec["pct"], dtype=np.float32),
+        logp=np.array(rec["logp"], dtype=np.float32),
+        reward=np.array(rec["reward"], dtype=np.float32),
+        alive=np.int64(rec["alive"]),
+    )
+
+
+def mode_worker_v2(hours):
+    """Farmer for the 100M teacher: records 128px bundles + labels + numbers.
+    Actions come from the current best net (any size that fits _policy_action
+    via 64px); the BUNDLE is what the teacher learns from."""
+    t_end = time.time() + hours * 3600
+    ep_per = int(os.environ.get("V2_EP", "5"))
+    flush_s = float(os.environ.get("FLUSH_S", "900"))
+    last_flush = time.time()
+    shard_i = 0
+    while time.time() < t_end:
+        net, meta = load_latest_net()
+        net.eval()
+        sk = str(np.random.choice(["medium"] * 3 + ["easy", "hard"]))
+        nb = int(np.random.choice([6, 8, 10, 12]))
+        seed0 = int(time.time()) % 100000
+        episodes = []
+        for e in range(ep_per):
+            game = T._make_game(sk, seed0 + e * 13 + 1, n_bots=nb)
+            rec = {k: [] for k in ("rgb", "lab", "nums", "kind", "cell",
+                                   "pct", "logp", "reward")}
+            rec["alive"] = False
+            done = False
+            while game.tick < game.max_ticks and not done:
+                st = game.state_for(1)
+                if not st.self_blob:
+                    break
+                act, pctv = T._policy_action(net, st, game)
+                rgb_s, lab_s, nums = game.frame_bundle(1, 128)
+                rec["rgb"].append(rgb_s)
+                rec["lab"].append(lab_s)
+                rec["nums"].append(nums)
+                rec["kind"].append({"expand": 0, "attack": 1, "bank": 2}[act.kind])
+                rec["cell"].append(_cell_of(act))
+                rec["pct"].append(float(pctv))
+                with torch.no_grad():
+                    pass  # logp approx: uniform-ish (policy stochasticity)
+                rec["logp"].append(-2.0)
+                area_before = int((game.world == 1).sum())
+                kills_before = game.players[1].kills
+                actions = {1: game._clicks_for(act, T.SIM["clicks_per_tick"])}
+                for pid in game._pids:
+                    if pid == 1 or not game.players[pid].alive:
+                        continue
+                    actions[pid] = game._bot_clicks(pid)
+                game.step(actions)
+                area_after = int((game.world == 1).sum())
+                reward = (area_after - area_before) / 2000.0
+                if game.players[1].kills > kills_before:
+                    reward += 2.0
+                if game.players[1].alive:
+                    reward += 0.005
+                    if area_after <= area_before:
+                        reward -= 0.002
+                else:
+                    reward -= 1.0
+                    done = True
+                    rec["reward"].append(reward)
+                    break
+                rec["reward"].append(reward)
+                if len(rec["reward"]) >= 250:
+                    break
+            rec["alive"] = bool(game.players[1].alive)
+            if len(rec["reward"]) >= 3:
+                episodes.append(rec)
+        if not episodes:
+            time.sleep(10)
+            continue
+        path = SHARDS_V2 / f"shard_v2_{int(time.time())}_{os.getpid()}_{shard_i}.npz"
+        merged = {k: np.concatenate([pack_v2(ep)[k] for ep in episodes])
+                  for k in ("rgb", "lab", "nums", "kind", "cell", "pct",
+                            "logp", "reward")}
+        merged["alive"] = np.array([pack_v2(ep)["alive"] for ep in episodes])
+        merged["lens"] = np.array([len(ep["reward"]) for ep in episodes])
+        np.savez_compressed(path, **merged)
+        shard_i += 1
+        log(f"v2 shard {path.name}: {len(episodes)} eps "
+            f"({merged['rgb'].shape[0]} steps)")
+        if time.time() - last_flush > flush_s:
+            push_shards_batch(SHARDS_V2)
+            last_flush = time.time()
+    push_shards_batch(SHARDS_V2)
+    log("v2 worker done")
 
 
 if __name__ == "__main__":

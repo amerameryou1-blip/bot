@@ -15,7 +15,9 @@ import argparse
 # fleet = 3 workers + CPU trainer + CPU v15 = exactly the 5-CPU cap
 # (Kaggle enforces it server-side; stay AT it, never over — user TOS check
 # 2026-08-08: CPU batch cap 5, GPU cap 2, separate pools)
-KERNELS = [f"rl-loop-worker-{i}" for i in range(1, 4)] + ["rl-loop-trainer-cpu"]
+KERNELS = ([f"rl-loop-worker-{i}" for i in range(1, 4)]
+           + [f"rl-v2-worker-{i}" for i in (1, 2)]
+           + ["rl-loop-trainer-cpu"])
 ALIVE = ("RUNNING", "QUEUED")
 
 
@@ -93,6 +95,10 @@ def main():
                 code = (L.TRAINER_BOOT.replace("@@HF@@", hf)
                         .replace("@@REPO@@", L.GH_REPO_URL)
                         .replace("@@HOURS@@", "9.0").replace("@@DELAY@@", "0"))
+            elif k.startswith("rl-v2-worker"):
+                code = (L.V2_WORKER_BOOT.replace("@@HF@@", hf)
+                        .replace("@@REPO@@", L.GH_REPO_URL)
+                        .replace("@@HOURS@@", "8.5"))
             else:
                 code = (L.WORKER_BOOT.replace("@@HF@@", hf)
                         .replace("@@REPO@@", L.GH_REPO_URL)
