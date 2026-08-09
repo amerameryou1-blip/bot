@@ -141,6 +141,11 @@ def process_recordings(rec_root: Path) -> dict:
                 if not line.strip():
                     continue
                 c = json.loads(line)
+                # audit 2026-08-09: clicks inside UI rects opened modals /
+                # did nothing — never teach the net to click there
+                x, y = c["x"], c["y"]
+                if y < 50 or (x < 300 and y < 320) or y > 740 or x >= 1210:
+                    continue
                 clicks[int(c["frame"])] = c
         n = 0
         for f in frames:

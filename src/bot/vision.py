@@ -69,6 +69,19 @@ def _adjacent_mask(mask: np.ndarray) -> np.ndarray:
     )
 
 
+def ui_mask(h: int, w: int) -> np.ndarray:
+    """Screen rects that are UI, not map (1280x800 layout, scaled). Clicks
+    there opened modals / did nothing — the match-#6 disaster. Data audit
+    2026-08-09: up to 95% of early clicks were UI garbage."""
+    sx, sy = w / 1280.0, h / 800.0
+    m = np.zeros((h, w), dtype=bool)
+    m[: int(50 * sy), :] = True                      # top banner
+    m[: int(320 * sy), : int(300 * sx)] = True       # leaderboard
+    m[int(740 * sy):, :] = True                      # bottom bar
+    m[:, int(1210 * sx):] = True                     # zoom buttons column
+    return m
+
+
 def find_expand_targets(self_mask: np.ndarray, neutral_mask: np.ndarray, max_samples: int = 120) -> np.ndarray:
     """NEUTRAL pixels adjacent to my territory — these are what I click to claim."""
     targets = neutral_mask & _adjacent_mask(self_mask)
@@ -107,24 +120,28 @@ def segment(frame: np.ndarray, palette: Palette) -> FrameState:
     labels = np.where(valid, labels, 0)
 
     h, w = labels.shape
-    neutral_mask = labels == 0
+    um = ui_mask(h, w)
+    neutral_mask = (labels == 0) & ~um
 
     # Self blob: label 1..n_self (self + lightened aliases).
     n_self = 1 + len(getattr(palette, "self_aliases", []))
     self_mask = (labels >= 1) & (labels <= n_self)
     self_blob = _blob_from_mask(self_mask, "me")
 
-    # Enemy blobs: labels after the self aliases.
+    # Enemy blobs: labels after the self aliases, never inside UI rects.
     enemies: list[Blob] = []
     for idx in range(n_self + 1, len(palette.all_colors) + 1):
-        mask = labels == idx
+        mask = (labels == idx) & ~um
         if mask.any():
             color = palette.all_colors[idx - 1]
-            enemies.append(_blob_from_mask(mask, color.name))
+            bl = _blob_from_mask(mask, color.name)
+            cy, cx = bl.centroid
+            if not um[int(cy), int(cx)]:
+                enemies.append(bl)
 
     frontiers = _find_frontiers(self_mask, neutral_mask) if self_blob.area > 0 else np.zeros((0, 2), dtype=int)
 
-    enemy_mask = labels >= 2
+    enemy_mask = (labels >= 2) & ~um
     expand_targets = (
         find_expand_targets(self_mask, neutral_mask, max_samples=160)
         if self_blob.area > 0 else np.zeros((0, 2), dtype=int)
