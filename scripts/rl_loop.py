@@ -207,7 +207,7 @@ def unpack_episodes(shard):
 def push_shards_batch(folder: Path):
     """ONE commit for all pending local shards (HF caps commits at
     128/h — per-shard commits were saturating the account budget)."""
-    files = sorted(folder.glob("shard_rl_*.npz"))
+    files = sorted(folder.glob("shard_*.npz"))
     if not files:
         return
     api, tok = _hf_api()

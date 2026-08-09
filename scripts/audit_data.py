@@ -97,12 +97,50 @@ def audit_shard(path):
     return probs
 
 
+def audit_v2_shard(path):
+    d = np.load(path)
+    probs = []
+    if d["rgb"].dtype != np.uint8:
+        probs.append("rgb not uint8")
+    if d["rgb"].shape[1:] != (128, 128, 3):
+        probs.append(f"rgb shape {d['rgb'].shape}")
+    if not np.isin(d["lab"], [0, 1, 2, 3]).all():
+        probs.append("lab out of range")
+    if not np.isin(d["kind"], [0, 1, 2]).all():
+        probs.append("kind out of range")
+    if (d["cell"].min() < 0) or (d["cell"].max() > 255):
+        probs.append("cell out of range")
+    if int(d["lens"].sum()) != len(d["rgb"]):
+        probs.append("lens sum != rgb len")
+    if not (np.isfinite(d["reward"]).all() and np.isfinite(d["nums"]).all()):
+        probs.append("non-finite reward/nums")
+    return probs
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--recordings")
     ap.add_argument("--shards", type=int, default=0)
+    ap.add_argument("--v2", type=int, default=0, help="audit N newest v2 shards")
     ap.add_argument("--purge", action="store_true")
     a = ap.parse_args()
+
+    if a.v2:
+        tok = os.environ.get("HF_TOKEN", "").strip()
+        from huggingface_hub import HfApi, hf_hub_download
+        api = HfApi(token=tok)
+        fs = sorted(f for f in api.list_repo_files(
+            "amer224/territorial-bot-data", repo_type="dataset", token=tok)
+            if f.startswith("rl/shards_v2/"))[-a.v2:]
+        bad = 0
+        for f in fs:
+            p = hf_hub_download("amer224/territorial-bot-data", f,
+                                repo_type="dataset", token=tok)
+            probs = audit_v2_shard(p)
+            bad += bool(probs)
+            print(f"[{'FAIL' if probs else 'PASS'}] {f}: {'; '.join(probs) or 'clean'}")
+        print("V2 AUDIT DONE", "— CLEAN" if not bad else f"— {bad} BAD")
+        return
 
     PURGE_MARKS = ("camera gate failed", "CROWN", "invisible", "untrusted")
     bad_sessions, purge_list = [], []
