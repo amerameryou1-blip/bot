@@ -25,6 +25,15 @@ subprocess.run([sys.executable, "-m", "pip", "install", "-q", "numpy",
 subprocess.run(["git", "clone", "--depth", "1", "@@REPO@@",
                 "/kaggle/working/bot"], check=True)
 os.chdir("/kaggle/working/bot")
+# sprint data route: shards live in the private GH repo (HF was jammed)
+subprocess.run(["git", "clone", "-q",
+                "https://@@GHTOK@@@github.com/amerameryou1-blip/bot-recordings.git",
+                "/tmp/shards_gh"], check=False)
+import glob, shutil, os as _os
+_os.makedirs("weights/nn/rl/shards_v2", exist_ok=True)
+for f in glob.glob("/tmp/shards_gh/shard_v2_*.npz"):
+    shutil.copy(f, "weights/nn/rl/shards_v2/")
+print("shards from GH:", len(glob.glob("weights/nn/rl/shards_v2/*.npz")))
 os.environ["EPOCHS"] = "@@EPOCHS@@"
 r = subprocess.run([sys.executable, "scripts/train_v2.py", "sup"])
 if r.returncode == 0:
@@ -52,7 +61,8 @@ def main():
         sys.exit(1)
     code = (V2_TRAIN_BOOT.replace("@@HF@@", hf)
             .replace("@@REPO@@", GH_REPO_URL)
-            .replace("@@EPOCHS@@", os.environ.get("EPOCHS", "6")))
+            .replace("@@EPOCHS@@", os.environ.get("EPOCHS", "6"))
+            .replace("@@GHTOK@@@", os.environ.get("GH_TOKEN", "")))
     print(push_kernel("v2-teacher-gpu", "v2-teacher-gpu", code))
 
 

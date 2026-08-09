@@ -529,10 +529,11 @@ def mode_worker_v2(hours):
                 flush_s = 900.0
             else:
                 flush_s = min(flush_s * 2, 7200.0)   # quiet protocol
-                # workspace budget guard: keep only last 2 local shards
+                # budget guard only when HF is actually reachable
                 loc = sorted(SHARDS_V2.glob("shard_v2_*.npz"))
-                for f in loc[:-2]:
-                    f.unlink()
+                if api0 and len(loc) > 2:
+                    for f in loc[:-2]:
+                        f.unlink()
             last_flush = time.time()
     push_shards_batch(SHARDS_V2)
     log("v2 worker done")

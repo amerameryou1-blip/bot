@@ -13,6 +13,24 @@ T = os.environ.get("HF_TOKEN", "")
 MARK = "/tmp/gpu_launched"
 
 
+def gh_count():
+    import subprocess
+    r = subprocess.run(["git", "ls-remote", os.environ.get("GH_URL", "")],
+                       capture_output=True, text=True)
+    return 0  # unused; size checked via API below
+
+
+def v2_count_gh():
+    req = urllib.request.Request(
+        "https://api.github.com/repos/amerameryou1-blip/bot-recordings/contents/",
+        headers={"Authorization": "token " + os.environ.get("GH_TOKEN", "")})
+    try:
+        d = json.load(urllib.request.urlopen(req))
+        return len([f for f in d if f["name"].startswith("shard_v2")])
+    except Exception:
+        return 0
+
+
 def v2_gb():
     tot = 0
     for p in ("rl/shards_v2", "rl/shards"):
@@ -39,7 +57,9 @@ def main():
         gb = v2_gb()
         el = (time.time() - t0) / 3600
         print(f"[autopilot] v2 {gb:.2f} GB, {el:.1f}h in", flush=True)
-        if gb >= 0.3 or (gb >= 0.1 and el >= 6.0):
+        n_gh = v2_count_gh()
+        print(f"[autopilot] GH shards {n_gh}", flush=True)
+        if n_gh >= 150 or gb >= 0.3 or (gb >= 0.1 and el >= 6.0):
             r = subprocess.run([sys.executable, "scripts/launch_v2_gpu.py"],
                                capture_output=True, text=True)
             print(r.stdout[-500:], r.stderr[-300:], flush=True)
