@@ -48,7 +48,9 @@ def pull_shards():
     try:
         import shutil
         files = api.list_repo_files(R.HF_DATASET, repo_type="dataset", token=tok)
-        new = [f for f in files if f.startswith("rl/shards_v2/")
+        new = [f for f in files
+               if (f.startswith("rl/shards_v2/") or
+                   (f.startswith("rl/shards/shard_v2") ))  # old workers misfoldered
                and not (R.SHARDS_V2 / Path(f).name).exists()
                and not (R.DONE_V2 / Path(f).name).exists()]
         for f in new[:4]:

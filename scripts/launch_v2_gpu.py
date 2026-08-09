@@ -28,7 +28,7 @@ os.chdir("/kaggle/working/bot")
 os.environ["EPOCHS"] = "@@EPOCHS@@"
 r = subprocess.run([sys.executable, "scripts/train_v2.py", "sup"])
 if r.returncode == 0:
-    subprocess.run([sys.executable, "scripts/train_v2.py", "distill"])
+    print("sup done; distill skipped (option B)")
 # upload results back to HF
 subprocess.run([sys.executable, "-c", """
 import os
