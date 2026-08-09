@@ -242,7 +242,7 @@ def mode_worker(hours, skill, n_bots):
                 try:
                     n = sum(1 for _ in api0.list_repo_tree(
                         HF_DATASET, "rl/shards", repo_type="dataset", token=tok0))
-                    over_cap = n > int(os.environ.get("HF_SHARD_CAP", "800"))
+                    over_cap = n > int(os.environ.get("HF_SHARD_CAP", "1200"))
                     if over_cap:
                         log(f"HF shard backlog {n} > cap — skipping uploads")
                 except Exception:
