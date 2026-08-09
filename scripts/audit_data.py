@@ -38,7 +38,7 @@ def audit_session(sess: Path):
     if sum(abs(a - b) for a, b in zip(sc, CROWN)) < 90:
         fails.append("self_color is the CROWN icon (pre-fix bug)")
     if sum(abs(a - b) for a, b in zip(sc, (48, 180, 24))) < 30:
-        warns.append("self_color = row-highlight green (pre-fix, untrusted)")
+        fails.append("self_color untrusted (row-highlight green, pre-fix)")
     frames = sorted((sess / "frames").glob("*.jpg"))
     if not frames:
         fails.append("no frames")
