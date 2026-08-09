@@ -214,7 +214,8 @@ def push_shards_batch(folder: Path) -> bool:
     if not api:
         return
     try:
-        api.upload_folder(folder_path=str(folder), path_in_repo="rl/shards",
+        api.upload_folder(folder_path=str(folder),
+                          path_in_repo="rl/" + folder.name,
                           repo_id=HF_DATASET, repo_type="dataset", token=tok,
                           ignore_patterns="*.partial")
         log(f"{len(files)} shards -> HF (1 commit)")
