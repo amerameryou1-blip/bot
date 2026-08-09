@@ -57,7 +57,7 @@ def _hb(phase, t_it=None, **extra):
     if t_it is not None:
         payload["iter_s"] = int(time.time() - t_it)
     payload.update(extra)
-    for attempt in range(3):
+    for attempt in range(1):
         try:
             api_h, tok_h = _hf_api()
             if not api_h:
@@ -204,7 +204,7 @@ def unpack_episodes(shard):
     return eps
 
 
-def push_shards_batch(folder: Path):
+def push_shards_batch(folder: Path) -> bool:
     """ONE commit for all pending local shards (HF caps commits at
     128/h — per-shard commits were saturating the account budget)."""
     files = sorted(folder.glob("shard_*.npz"))
@@ -220,8 +220,10 @@ def push_shards_batch(folder: Path):
         log(f"{len(files)} shards -> HF (1 commit)")
         for f in files:
             f.unlink()
+        return True
     except Exception as e:
-        log(f"batch upload failed ({str(e)[:60]}) — kept local")
+        log(f"batch upload failed ({str(e)[:60]}) — kept local, backoff")
+        return False
 
 
 # ------------------------------------------------------------------ worker ---
@@ -276,7 +278,10 @@ def mode_worker(hours, skill, n_bots):
             for f in loc[:-30]:
                 f.unlink()  # backlog capped: drop oldest local experience
         elif time.time() - last_flush > flush_s:
-            push_shards_batch(SHARDS)   # 1 HF commit per flush
+            if push_shards_batch(SHARDS):
+                flush_s = 1200.0
+            else:
+                flush_s = min(flush_s * 2, 7200.0)   # quiet protocol
             last_flush = time.time()
         time.sleep(sleep_s)
     push_shards_batch(SHARDS)
@@ -519,7 +524,10 @@ def mode_worker_v2(hours):
         log(f"v2 shard {path.name}: {len(episodes)} eps "
             f"({merged['rgb'].shape[0]} steps)")
         if time.time() - last_flush > flush_s:
-            push_shards_batch(SHARDS_V2)
+            if push_shards_batch(SHARDS_V2):
+                flush_s = 900.0
+            else:
+                flush_s = min(flush_s * 2, 7200.0)   # quiet protocol
             last_flush = time.time()
     push_shards_batch(SHARDS_V2)
     log("v2 worker done")

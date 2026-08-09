@@ -48,6 +48,11 @@ def push_trainer_best_effort():
 
 
 def tidy_old_shards():
+    import os as _os
+    # quiet protocol: at most one tidy attempt per hour
+    if _os.path.exists("/tmp/last_tidy") and             _os.path.getmtime("/tmp/last_tidy") > __import__("time").time() - 3600:
+        return
+    open("/tmp/last_tidy", "w").write("x")
     """Delete the 6 old root filler shards once HF's 128-commits/h budget
     allows (idempotent; silently retries every watchdog cycle)."""
     try:
