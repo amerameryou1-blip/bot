@@ -52,8 +52,9 @@ subprocess.run(["git", "clone", "--depth", "1", "@@REPO@@", "/kaggle/working/bot
                check=True)
 os.chdir("/kaggle/working/bot")
 os.environ["FORCE_CPU"] = "1"
-os.environ["TRAIN_EPOCHS"] = "2"   # leaner iterations on CPU
-os.environ["EVAL_SEEDS"] = "3"
+os.environ["TRAIN_EPOCHS"] = "1"   # lean iterations on CPU (measured 2026-08-09)
+os.environ["EVAL_SEEDS"] = "2"
+os.environ["EP_CAP"] = "12"
 time.sleep(@@DELAY@@ * 60)
 subprocess.run([sys.executable, "scripts/rl_loop.py", "trainer",
                 "--hours", "@@HOURS@@"], check=False)

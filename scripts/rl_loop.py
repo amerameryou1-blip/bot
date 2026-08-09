@@ -276,7 +276,19 @@ def mode_trainer(hours):
         log(f"seeded best from v14 checkpoint: wr={wr:.2f} rank={rank:.2f}")
     while time.time() < t_end:
         t_it = time.time()
-        # pull new HF shards
+        # boot/iter heartbeat FIRST, before any heavy work, so liveness is
+        # visible from outside within minutes of (re)start
+        try:
+            api_h, tok_h = _hf_api()
+            if api_h:
+                hb = RL / "hb.json"
+                json.dump({"ts": int(time.time()), "phase": "iter_start",
+                           "iter_s": 0}, open(hb, "w"))
+                api_h.upload_file(path_or_fileobj=str(hb),
+                                  path_in_repo="rl/trainer_heartbeat.json",
+                                  repo_id=HF_DATASET, repo_type="dataset", token=tok_h)
+        except Exception as e:
+            log(f"[hb] upload skipped ({str(e)[:50]})")
         log(f"[hb] iter start (pending local={len(list(SHARDS.glob('shard_*.npz')))})")
         if api:
             try:
@@ -309,8 +321,9 @@ def mode_trainer(hours):
             continue
         # cap the PPO batch: 2M-param PPO is heavy on CPU; more iterations
         # with fresher data beats giant slow ones (measured 2026-08-09)
-        if len(episodes) > 24:
-            idx = np.random.choice(len(episodes), 24, replace=False)
+        cap = int(os.environ.get("EP_CAP", "24"))
+        if len(episodes) > cap:
+            idx = np.random.choice(len(episodes), cap, replace=False)
             episodes = [episodes[i] for i in sorted(idx)]
         net, _ = load_latest_net()
         opt = T.make_optimizer(net)   # Muon+AdamW hybrid, NaN-watchdogged
