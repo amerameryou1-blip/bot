@@ -98,20 +98,26 @@ def audit_shard(path):
 
 
 def audit_v2_shard(path):
+    """Size-agnostic (128/192/256 px, grid=size//8, REC_EVERY 1-4)."""
     d = np.load(path)
     probs = []
+    size = d["rgb"].shape[1]
+    grid = size // 8
     if d["rgb"].dtype != np.uint8:
         probs.append("rgb not uint8")
-    if d["rgb"].shape[1:] != (128, 128, 3):
+    if size not in (128, 192, 256) or d["rgb"].shape[2] != size or d["rgb"].shape[3] != 3:
         probs.append(f"rgb shape {d['rgb'].shape}")
+    if d["lab"].shape[1:] != (size, size):
+        probs.append("lab shape mismatch")
     if not np.isin(d["lab"], [0, 1, 2, 3]).all():
         probs.append("lab out of range")
     if not np.isin(d["kind"], [0, 1, 2]).all():
         probs.append("kind out of range")
-    if (d["cell"].min() < 0) or (d["cell"].max() > 255):
+    if (d["cell"].min() < 0) or (d["cell"].max() >= grid * grid):
         probs.append("cell out of range")
-    if int(d["lens"].sum()) != len(d["rgb"]):
-        probs.append("lens sum != rgb len")
+    ls, rl = int(d["lens"].sum()), len(d["rgb"])
+    if not (rl <= ls <= rl * 4):
+        probs.append(f"lens/rgb ratio odd ({ls} vs {rl})")
     if not (np.isfinite(d["reward"]).all() and np.isfinite(d["nums"]).all()):
         probs.append("non-finite reward/nums")
     return probs
