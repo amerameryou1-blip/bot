@@ -186,8 +186,196 @@ def main():
         stage_sup(epochs=int(os.environ.get("EPOCHS", "2")))
     elif stage == "distill":
         stage_distill(epochs=int(os.environ.get("EPOCHS", "2")))
+    elif stage == "ppo":
+        stage_ppo_v2(rounds=int(os.environ.get("ROUNDS", "8")))
     print("V2 DONE", flush=True)
 
 
 if __name__ == "__main__":
     main()
+
+
+# ============================== PPO for the 100M teacher ====================
+def _bundle_x(game, prev):
+    rgb, lab, nums = game.frame_bundle(1, 128)
+    r = rgb.transpose(2, 0, 1)[None].astype(np.float32) / 255.0
+    if prev is None:
+        diff = np.full_like(r, 0.5)
+    else:
+        diff = np.clip(r - prev, -1, 1) * 0.5 + 0.5
+    x = np.concatenate([r, diff], 1)
+    return torch.tensor(x, device=DEVICE), torch.tensor(
+        nums[None], device=DEVICE), rgb, lab
+
+
+def _rollout_v2(net, seed, skill, n_bots, max_steps=250):
+    import train_nn as T
+    game = T._make_game(skill, seed, n_bots=n_bots)
+    ep = dict(rgb=[], nums=[], kind=[], cell=[], pct=[], logp=[], reward=[])
+    prev = None
+    done = False
+    while game.tick < game.max_ticks and not done and len(ep["reward"]) < max_steps:
+        st = game.state_for(1)
+        if not st.self_blob:
+            break
+        x, nums_t, rgb, lab = _bundle_x(game, prev)
+        with torch.no_grad():
+            click, kind, pct, value = net(x, nums_t)
+            pk = torch.softmax(kind[0], 0)
+            pc = torch.softmax(click[0], 0)
+            kind_i = int(torch.multinomial(pk, 1))
+            cell_i = int(torch.multinomial(pc, 1))
+            lp = float(torch.log(pk[kind_i] + 1e-8) +
+                       (torch.log(pc[cell_i] + 1e-8) if kind_i != 2 else 0))
+        cy, cx = divmod(cell_i, 16)
+        kind_s = {0: "expand", 1: "attack", 2: "bank"}[kind_i]
+        from bot.planner import ClickAction
+        act = ClickAction(kind_s, (cx + 0.5) / 16 * 200, (cy + 0.5) / 16 * 200,
+                          float(pct[0]) * 100 if kind_i == 1 else 0.0, reason="ppo")
+        ep["rgb"].append(rgb)
+        ep["nums"].append(game.numeric_ctx(1))
+        ep["kind"].append(kind_i)
+        ep["cell"].append(cell_i)
+        ep["pct"].append(float(pct[0]))
+        ep["logp"].append(lp)
+        area_b = int((game.world == 1).sum())
+        kills_b = game.players[1].kills
+        actions = {1: game._clicks_for(act, 14)}
+        for pid in game._pids:
+            if pid == 1 or not game.players[pid].alive:
+                continue
+            actions[pid] = game._bot_clicks(pid)
+        game.step(actions)
+        area_a = int((game.world == 1).sum())
+        rw = (area_a - area_b) / 2000.0
+        if game.players[1].kills > kills_b:
+            rw += 2.0
+        if game.players[1].alive:
+            rw += 0.005
+            if area_a <= area_b:
+                rw -= 0.002
+        else:
+            rw -= 1.0
+            done = True
+        ep["reward"].append(rw)
+        prev = r = None
+        prev_rgb = rgb
+        prev = rgb.transpose(2, 0, 1)[None].astype(np.float32) / 255.0
+    ep["alive"] = bool(game.players[1].alive)
+    return ep, game
+
+
+def _ep_tensors(ep):
+    rgb = np.stack(ep["rgb"]).transpose(0, 3, 1, 2).astype(np.float32) / 255.0
+    prev = np.concatenate([rgb[:1], rgb[:-1]])
+    diff = np.clip(rgb - prev, -1, 1) * 0.5 + 0.5
+    x = torch.tensor(np.concatenate([rgb, diff], 1), device=DEVICE)
+    nums = torch.tensor(np.stack(ep["nums"]), device=DEVICE)
+    return (x, nums,
+            torch.tensor(ep["kind"], device=DEVICE),
+            torch.tensor(ep["cell"], device=DEVICE),
+            torch.tensor(ep["pct"], device=DEVICE),
+            torch.tensor(ep["logp"], device=DEVICE),
+            np.array(ep["reward"], np.float32), ep["alive"])
+
+
+def stage_ppo_v2(rounds=8, ep_per_round=6, epochs=4, gamma=0.99, lam=0.95,
+                 clip=0.2, lr=3e-5):
+    net = TeacherV2().to(DEVICE)
+    if TEACH_PT.exists():
+        net.load_state_dict(torch.load(TEACH_PT, map_location=DEVICE))
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        net = torch.nn.DataParallel(net)
+    base = net.module if hasattr(net, "module") else net
+    opt = torch.optim.Adam(base.parameters(), lr=lr)
+    best_wr = -1.0
+    for rnd in range(rounds):
+        eps = []
+        for e in range(ep_per_round):
+            ep, game = _rollout_v2(base, 1000 + rnd * 31 + e,
+                                   np.random.choice(["easy", "medium", "hard"]),
+                                   int(np.random.choice([6, 8, 10, 12])))
+            if len(ep["reward"]) >= 10:
+                eps.append(ep)
+        if not eps:
+            continue
+        # advantages
+        items = []
+        alladv = []
+        for ep in eps:
+            x, nums, kb, cb, pb, oldlp, rw, alive = _ep_tensors(ep)
+            with torch.no_grad():
+                _, _, _, vals = net(x, nums)
+                vals = vals.cpu().numpy()
+            T_ = len(rw)
+            rw10 = rw * 10.0
+            adv = np.zeros(T_); gae = 0.0
+            for t in reversed(range(T_)):
+                nxt = vals[t + 1] if t + 1 < T_ else (1.0 if alive else 0.0)
+                d = rw10[t] + gamma * nxt - vals[t]
+                gae = d + gamma * lam * gae
+                adv[t] = gae
+            alladv += list(adv)
+            items.append((x, nums, kb, cb, oldlp, adv))
+        alladv = np.array(alladv)
+        if alladv.std() > 1e-6:
+            norm = (alladv - alladv.mean()) / (alladv.std() + 1e-8)
+        else:
+            norm = alladv
+        off = 0
+        for _ in range(epochs):
+            for (x, nums, kb, cb, oldlp, adv) in items:
+                T_ = len(adv)
+                a_t = torch.tensor(norm[off:off + T_], device=DEVICE)
+                off += T_
+                click, kind, pct, value = net(x, nums)
+                lpk = torch.log_softmax(kind, 1).gather(
+                    1, kb.unsqueeze(1)).squeeze(1)
+                lpc = torch.log_softmax(click, 1).gather(
+                    1, cb.unsqueeze(1)).squeeze(1)
+                lp = lpk + lpc * (kb != 2).float()
+                ratio = torch.exp(lp - oldlp)
+                pg = -torch.min(ratio * a_t,
+                                torch.clamp(ratio, 1 - clip, 1 + clip) * a_t).mean()
+                ent = -(torch.log_softmax(kind, 1) *
+                        torch.log_softmax(kind, 1).exp()).mean()
+                loss = pg - 0.03 * ent
+                if not torch.isfinite(loss):
+                    opt.zero_grad()
+                    continue
+                opt.zero_grad()
+                loss.backward()
+                opt.step()
+        wr = eval_v2(base, seeds=3)
+        print(f"[ppo] round {rnd}: wr={wr:.2f}", flush=True)
+        if wr > best_wr:
+            best_wr = wr
+            sd = base.state_dict()
+            torch.save(sd, TEACH_PT)
+            _upload_teacher()
+    print(f"[ppo] done best_wr={best_wr:.2f}", flush=True)
+
+
+def eval_v2(net, seeds=4):
+    import train_nn as T
+    wins = 0
+    for s in range(seeds):
+        ep, game = _rollout_v2(net, 5000 + s, "mixed", 10, max_steps=2400)
+        alive = game.players[1].alive
+        alive_n = sum(1 for p in game._pids if game.players[p].alive)
+        wins += 1 if (alive and alive_n == 1) else 0
+    return wins / seeds
+
+
+def _upload_teacher():
+    try:
+        from huggingface_hub import HfApi
+        tok = os.environ.get("HF_TOKEN", "")
+        if not tok:
+            return
+        HfApi(token=tok).upload_file(
+            path_or_fileobj=str(TEACH_PT), path_in_repo="v2/teacher.pt",
+            repo_id="amer224/territorial-bot-data", repo_type="dataset", token=tok)
+        print("[ppo] teacher uploaded", flush=True)
+    except Exception as e:
+        print("[ppo] upload fail", str(e)[:80], flush=True)
