@@ -22,18 +22,29 @@ subprocess.run([sys.executable, "-c",
                check=False)
 subprocess.run([sys.executable, "-m", "pip", "install", "-q", "numpy",
                 "huggingface_hub"], check=False)
-subprocess.run(["git", "clone", "--depth", "1", "@@REPO@@",
+subprocess.run(["git", "clone", "--depth", "1", "@@REPO_URL@@",
                 "/kaggle/working/bot"], check=True)
 os.chdir("/kaggle/working/bot")
-# sprint data route: shards live in the private GH repo (HF was jammed)
-subprocess.run(["git", "clone", "-q",
-                "https://@@GHTOK@@@github.com/amerameryou1-blip/bot-recordings.git",
-                "/tmp/shards_gh"], check=False)
+# data route: v2 shards live on HF now (workers upload direct)
 import glob, shutil, os as _os
 _os.makedirs("weights/nn/rl/shards_v2", exist_ok=True)
-for f in glob.glob("/tmp/shards_gh/shard_v2_*.npz"):
-    shutil.copy(f, "weights/nn/rl/shards_v2/")
-print("shards from GH:", len(glob.glob("weights/nn/rl/shards_v2/*.npz")))
+try:
+    from huggingface_hub import snapshot_download
+    p2 = snapshot_download("amer224/territorial-bot-data", repo_type="dataset",
+                           allow_patterns=["rl/shards_v2/*"],
+                           token=os.environ["HF_TOKEN"])
+    for f in glob.glob(p2 + "/rl/shards_v2/*.npz"):
+        shutil.copy(f, "weights/nn/rl/shards_v2/")
+    print("shards from HF:", len(glob.glob("weights/nn/rl/shards_v2/*.npz")))
+except Exception as e:
+    print("HF pull failed:", str(e)[:100])
+if len(glob.glob("weights/nn/rl/shards_v2/*.npz")) == 0:
+    subprocess.run(["git", "clone", "-q",
+                    "https://@@GHTOK@@@github.com/amerameryou1-blip/bot-recordings.git",
+                    "/tmp/shards_gh"], check=False)
+    for f in glob.glob("/tmp/shards_gh/shard_v2_*.npz"):
+        shutil.copy(f, "weights/nn/rl/shards_v2/")
+    print("shards from GH:", len(glob.glob("weights/nn/rl/shards_v2/*.npz")))
 os.environ["EPOCHS"] = "@@EPOCHS@@"
 r = subprocess.run([sys.executable, "scripts/train_v2.py", "sup"])
 if r.returncode == 0:
@@ -60,7 +71,7 @@ def main():
         print("HF_TOKEN required")
         sys.exit(1)
     code = (V2_TRAIN_BOOT.replace("@@HF@@", hf)
-            .replace("@@REPO@@", GH_REPO_URL)
+            .replace("@@REPO_URL@@", "https://" + os.environ.get("GH_TOKEN", "") + "@github.com/amerameryou1-blip/bot.git")
             .replace("@@EPOCHS@@", os.environ.get("EPOCHS", "6"))
             .replace("@@GHTOK@@@", os.environ.get("GH_TOKEN", "")))
     print(push_kernel("v2-teacher-gpu", "v2-teacher-gpu", code, gpu=True))
