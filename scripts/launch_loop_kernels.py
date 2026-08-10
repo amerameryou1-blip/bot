@@ -43,8 +43,9 @@ print("WORKER_SESSION_DONE", flush=True)
 
 V2_WORKER_BOOT = WORKER_BOOT.replace(
     'os.environ["EP_PER_SHARD"] = "10"',
-    'os.environ["V2"] = "1"\nos.environ["V2_EP"] = "5"\n'
-    'os.environ["FLUSH_S"] = "900"')
+    'os.environ["V2"] = "1"\nos.environ["V2_EP"] = "6"\n'
+    'os.environ["FLUSH_S"] = "1200"\nos.environ["V2_SIZE"] = "192"\n'
+    'os.environ["REC_EVERY"] = "3"')
 
 TRAINER_BOOT = '''import os, sys, subprocess, time
 os.environ.setdefault("HF_TOKEN", "@@HF@@")

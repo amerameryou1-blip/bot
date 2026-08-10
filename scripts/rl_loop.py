@@ -243,7 +243,7 @@ def mode_worker(hours, skill, n_bots):
         # scale; medium difficulty is the sweet spot (easy->overfit,
         # hard->sparse rewards). Randomize lobby per shard.
         sk = str(np.random.choice(["medium"] * 3 + ["easy", "hard"]))
-        nb = int(np.random.choice([16, 24, 32, 48, 12]))  # big chaotic lobbies
+        nb = int(np.random.choice([8, 12, 16, 24, 32]))  # chaotic but survivable
         episodes, seed0 = [], int(time.time()) % 100000
         for s in range(ep_per_shard):
             episodes += T._rollout_one(net, seed0 + s * 7 + 1, sk, 1, n_bots=nb)
@@ -462,7 +462,7 @@ def mode_worker_v2(hours):
         net, meta = load_latest_net()
         net.eval()
         sk = str(np.random.choice(["medium"] * 3 + ["easy", "hard"]))
-        nb = int(np.random.choice([16, 24, 32, 48, 12]))  # big chaotic lobbies
+        nb = int(np.random.choice([8, 12, 16, 24, 32]))  # chaotic but survivable
         seed0 = int(time.time()) % 100000
         episodes = []
         for e in range(ep_per):
