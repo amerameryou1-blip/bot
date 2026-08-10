@@ -63,7 +63,7 @@ def main():
             .replace("@@REPO@@", GH_REPO_URL)
             .replace("@@EPOCHS@@", os.environ.get("EPOCHS", "6"))
             .replace("@@GHTOK@@@", os.environ.get("GH_TOKEN", "")))
-    print(push_kernel("v2-teacher-gpu", "v2-teacher-gpu", code))
+    print(push_kernel("v2-teacher-gpu", "v2-teacher-gpu", code, gpu=True))
 
 
 if __name__ == "__main__":

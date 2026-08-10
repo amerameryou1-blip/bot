@@ -67,7 +67,7 @@ print("TRAINER_SESSION_DONE", flush=True)
 '''
 
 
-def push_kernel(slug: str, title: str, code: str) -> str:
+def push_kernel(slug: str, title: str, code: str, gpu: bool = False) -> str:
     d = tempfile.mkdtemp(prefix=f"kg-{slug}-")
     with open(os.path.join(d, "main.py"), "w") as f:
         f.write("import sys\n" + code)
@@ -81,7 +81,7 @@ def push_kernel(slug: str, title: str, code: str) -> str:
         # CPU-only fleet: GPU hours are reserved for final big pushes
         # (user decision 2026-08-08). Platform caps concurrent CPU at 5,
         # so the default fleet is 4 workers + 1 trainer.
-        "enable_gpu": False,
+        "enable_gpu": gpu,
         "enable_internet": True,
         "kernel_sources": [],
         "dataset_sources": [],

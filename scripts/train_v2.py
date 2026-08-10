@@ -53,7 +53,7 @@ def pull_shards():
                    (f.startswith("rl/shards/shard_v2") ))  # old workers misfoldered
                and not (R.SHARDS_V2 / Path(f).name).exists()
                and not (R.DONE_V2 / Path(f).name).exists()]
-        for f in new[:4]:
+        for f in new[:300]:
             p = api.hf_hub_download(R.HF_DATASET, f, repo_type="dataset", token=tok)
             shutil.move(p, str(R.SHARDS_V2 / Path(f).name))
         if new:
@@ -66,7 +66,11 @@ def _batches(shards, bs, epochs):
     for ep in range(epochs):
         np.random.shuffle(shards)
         for sp in shards:
-            d = np.load(sp)
+            try:
+                d = np.load(sp)
+            except Exception as e:
+                print("skip bad shard", sp.name, str(e)[:60])
+                continue
             rgb = d["rgb"]
             n = len(rgb)
             for i in range(0, n, bs):
@@ -101,6 +105,9 @@ def stage_sup(epochs=2, bs=16, lr=3e-4):
     if os.environ.get("SMOKE") == "1":
         shards = shards[:1]
     net = TeacherV2().to(DEVICE)
+    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
+        net = torch.nn.DataParallel(net)   # T4x2 ready
+        print(f"[sup] DataParallel on {torch.cuda.device_count()} GPUs")
     print(f"[sup] teacher {count_params(net)/1e6:.1f}M on {len(shards)} shards",
           flush=True)
     opt = T.make_optimizer(net)
@@ -124,7 +131,8 @@ def stage_sup(epochs=2, bs=16, lr=3e-4):
         print(f"  sup epoch {ep+1}: loss={tot/max(nb,1):.4f}", flush=True)
         if os.environ.get("SMOKE") == "1":
             break
-    torch.save(net.state_dict(), TEACH_PT)
+    sd = net.module.state_dict() if hasattr(net, "module") else net.state_dict()
+    torch.save(sd, TEACH_PT)
     print(f"[sup] saved {TEACH_PT}", flush=True)
     return net
 
