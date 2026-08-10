@@ -11,6 +11,7 @@ import urllib.request
 
 T = os.environ.get("HF_TOKEN", "")
 MARK = "/tmp/gpu_launched"
+REVIEW = "/tmp/review_ok"
 
 
 def gh_count():
@@ -50,7 +51,7 @@ def v2_gb():
 
 def main():
     t0 = time.time()
-    end = t0 + 7 * 3600
+    end = t0 + 14 * 3600
     while time.time() < end:
         if os.path.exists(MARK):
             return
@@ -59,7 +60,8 @@ def main():
         print(f"[autopilot] v2 {gb:.2f} GB, {el:.1f}h in", flush=True)
         n_gh = v2_count_gh()
         print(f"[autopilot] GH shards {n_gh}", flush=True)
-        if n_gh >= 150 or gb >= 0.3 or (gb >= 0.1 and el >= 6.0):
+        # user rule (2026-08-10): NO GPU unless >=15GB AND agent reviewed data
+        if gb >= 15.0 and os.path.exists(REVIEW):
             r = subprocess.run([sys.executable, "scripts/launch_v2_gpu.py"],
                                capture_output=True, text=True)
             print(r.stdout[-500:], r.stderr[-300:], flush=True)

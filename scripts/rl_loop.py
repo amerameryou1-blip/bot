@@ -243,7 +243,7 @@ def mode_worker(hours, skill, n_bots):
         # scale; medium difficulty is the sweet spot (easy->overfit,
         # hard->sparse rewards). Randomize lobby per shard.
         sk = str(np.random.choice(["medium"] * 3 + ["easy", "hard"]))
-        nb = int(np.random.choice([6, 8, 10, 12]))
+        nb = int(np.random.choice([16, 24, 32, 48, 12]))  # big chaotic lobbies
         episodes, seed0 = [], int(time.time()) % 100000
         for s in range(ep_per_shard):
             episodes += T._rollout_one(net, seed0 + s * 7 + 1, sk, 1, n_bots=nb)
@@ -423,11 +423,12 @@ for d in (SHARDS_V2, DONE_V2):
     d.mkdir(parents=True, exist_ok=True)
 
 
-def _cell_of(act, grid=16):
+def _cell_of(act, game=None, grid=32):
     if act.kind == "bank" or act.x is None:
         return 0
-    cx = min(grid - 1, max(0, int(act.x / 200 * grid)))   # sim world is 200x200
-    cy = min(grid - 1, max(0, int(act.y / 200 * grid)))
+    w = game.w if game is not None else 400
+    cx = min(grid - 1, max(0, int(act.x / w * grid)))
+    cy = min(grid - 1, max(0, int(act.y / w * grid)))
     return cy * grid + cx
 
 
@@ -450,15 +451,18 @@ def mode_worker_v2(hours):
     Actions come from the current best net (any size that fits _policy_action
     via 64px); the BUNDLE is what the teacher learns from."""
     t_end = time.time() + hours * 3600
-    ep_per = int(os.environ.get("V2_EP", "5"))
-    flush_s = float(os.environ.get("FLUSH_S", "900"))
+    ep_per = int(os.environ.get("V2_EP", "4"))
+    flush_s = float(os.environ.get("FLUSH_S", "1200"))
+    V2_SIZE = int(os.environ.get("V2_SIZE", "256"))     # HD eyes (was 128)
+    rec_every = int(os.environ.get("REC_EVERY", "2"))   # record every 2nd tick
+    GRID = V2_SIZE // 8
     last_flush = time.time()
     shard_i = 0
     while time.time() < t_end:
         net, meta = load_latest_net()
         net.eval()
         sk = str(np.random.choice(["medium"] * 3 + ["easy", "hard"]))
-        nb = int(np.random.choice([6, 8, 10, 12]))
+        nb = int(np.random.choice([16, 24, 32, 48, 12]))  # big chaotic lobbies
         seed0 = int(time.time()) % 100000
         episodes = []
         for e in range(ep_per):
@@ -472,16 +476,15 @@ def mode_worker_v2(hours):
                 if not st.self_blob:
                     break
                 act, pctv = T._policy_action(net, st, game)
-                rgb_s, lab_s, nums = game.frame_bundle(1, 128)
-                rec["rgb"].append(rgb_s)
-                rec["lab"].append(lab_s)
-                rec["nums"].append(nums)
-                rec["kind"].append({"expand": 0, "attack": 1, "bank": 2}[act.kind])
-                rec["cell"].append(_cell_of(act))
-                rec["pct"].append(float(pctv))
-                with torch.no_grad():
-                    pass  # logp approx: uniform-ish (policy stochasticity)
-                rec["logp"].append(-2.0)
+                if game.tick % rec_every == 0:
+                    rgb_s, lab_s, nums = game.frame_bundle(1, V2_SIZE)
+                    rec["rgb"].append(rgb_s)
+                    rec["lab"].append(lab_s)
+                    rec["nums"].append(nums)
+                    rec["kind"].append({"expand": 0, "attack": 1, "bank": 2}[act.kind])
+                    rec["cell"].append(_cell_of(act, game, GRID))
+                    rec["pct"].append(float(pctv))
+                    rec["logp"].append(-2.0)
                 area_before = int((game.world == 1).sum())
                 kills_before = game.players[1].kills
                 actions = {1: game._clicks_for(act, T.SIM["clicks_per_tick"])}

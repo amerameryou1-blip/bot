@@ -32,7 +32,7 @@ SHOTS = Path(os.environ.get("SHOTS_DIR", REPO / ".." / "realdata" / "shots"))
 OUT = REPO / "weights" / "maps"
 OUT.mkdir(parents=True, exist_ok=True)
 
-TARGET_W = 200
+TARGET_W = 400
 TOL_PCT = 5.0
 
 # screenshot -> (slug, real_w, real_h, expected stats from in-game OCR)

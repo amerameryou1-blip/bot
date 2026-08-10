@@ -79,8 +79,9 @@ def _batches(shards, bs, epochs):
                 diff = np.clip(r - prev, -1, 1) * 0.5 + 0.5
                 x = np.concatenate([r, diff], 1)
                 lab = d["lab"][i:i + bs]
+                g = r.shape[2] // 8
                 lab16 = torch.tensor(
-                    _nn_resize(lab, GRID), dtype=torch.int64, device=DEVICE)
+                    _nn_resize(lab, g), dtype=torch.int64, device=DEVICE)
                 yield (torch.tensor(x, device=DEVICE), lab16,
                        torch.tensor(d["nums"][i:i + bs], device=DEVICE),
                        torch.tensor(d["cell"][i:i + bs], device=DEVICE),
@@ -196,8 +197,9 @@ if __name__ == "__main__":
 
 
 # ============================== PPO for the 100M teacher ====================
-def _bundle_x(game, prev):
-    rgb, lab, nums = game.frame_bundle(1, 128)
+def _bundle_x(game, prev, size=None):
+    size = size or int(os.environ.get("V2_SIZE", "256"))
+    rgb, lab, nums = game.frame_bundle(1, size)
     r = rgb.transpose(2, 0, 1)[None].astype(np.float32) / 255.0
     if prev is None:
         diff = np.full_like(r, 0.5)
@@ -211,6 +213,8 @@ def _bundle_x(game, prev):
 def _rollout_v2(net, seed, skill, n_bots, max_steps=250):
     import train_nn as T
     game = T._make_game(skill, seed, n_bots=n_bots)
+    size = int(os.environ.get("V2_SIZE", "256"))
+    grid = size // 8
     ep = dict(rgb=[], nums=[], kind=[], cell=[], pct=[], logp=[], reward=[])
     prev = None
     done = False
@@ -218,7 +222,7 @@ def _rollout_v2(net, seed, skill, n_bots, max_steps=250):
         st = game.state_for(1)
         if not st.self_blob:
             break
-        x, nums_t, rgb, lab = _bundle_x(game, prev)
+        x, nums_t, rgb, lab = _bundle_x(game, prev, size)
         with torch.no_grad():
             click, kind, pct, value = net(x, nums_t)
             pk = torch.softmax(kind[0], 0)
@@ -227,10 +231,11 @@ def _rollout_v2(net, seed, skill, n_bots, max_steps=250):
             cell_i = int(torch.multinomial(pc, 1))
             lp = float(torch.log(pk[kind_i] + 1e-8) +
                        (torch.log(pc[cell_i] + 1e-8) if kind_i != 2 else 0))
-        cy, cx = divmod(cell_i, 16)
+        cy, cx = divmod(cell_i, grid)
         kind_s = {0: "expand", 1: "attack", 2: "bank"}[kind_i]
         from bot.planner import ClickAction
-        act = ClickAction(kind_s, (cx + 0.5) / 16 * 200, (cy + 0.5) / 16 * 200,
+        act = ClickAction(kind_s, (cx + 0.5) / grid * game.w,
+                          (cy + 0.5) / grid * game.w,
                           float(pct[0]) * 100 if kind_i == 1 else 0.0, reason="ppo")
         ep["rgb"].append(rgb)
         ep["nums"].append(game.numeric_ctx(1))

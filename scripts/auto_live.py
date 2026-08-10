@@ -11,19 +11,16 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
 def teacher_url():
-    req = urllib.request.Request(
-        "https://huggingface.co/api/datasets/amer224/territorial-bot-data/"
-        "tree/main/v2", headers={"Authorization":
-                                 "Bearer " + os.environ.get("HF_TOKEN", "")})
     try:
-        d = urllib.request.urlopen(req)
-        import json
-        for f in json.load(d):
-            if f["path"].endswith("teacher.pt"):
-                return ("https://huggingface.co/datasets/amer224/"
-                        "territorial-bot-data/resolve/main/v2/teacher.pt")
-    except Exception:
-        pass
+        from huggingface_hub import HfApi
+        api = HfApi(token=os.environ.get("HF_TOKEN", ""))
+        fs = api.list_repo_files("amer224/territorial-bot-data",
+                                 repo_type="dataset",
+                                 token=os.environ.get("HF_TOKEN", ""))
+        if any(f == "v2/teacher.pt" for f in fs):
+            return "hf"
+    except Exception as e:
+        print("[live] teacher check err:", str(e)[:80], flush=True)
     return None
 
 
@@ -32,9 +29,14 @@ def main():
     while time.time() < end:
         url = teacher_url()
         if url:
+            from huggingface_hub import hf_hub_download
             dst = os.path.join(REPO, "weights/nn/v2/teacher.pt")
             os.makedirs(os.path.dirname(dst), exist_ok=True)
-            urllib.request.urlretrieve(url, dst)
+            got = hf_hub_download("amer224/territorial-bot-data", "v2/teacher.pt",
+                                  repo_type="dataset",
+                                  token=os.environ.get("HF_TOKEN", ""))
+            import shutil
+            shutil.copy(got, dst)
             print("[live] teacher downloaded, starting attempts", flush=True)
             for i in range(4):
                 env = dict(os.environ)
