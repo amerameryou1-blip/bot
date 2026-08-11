@@ -71,6 +71,21 @@ def _batches(shards, bs, epochs):
             except Exception as e:
                 print("skip bad shard", sp.name, str(e)[:60])
                 continue
+            # arena-map filter (2026-08-11): lobby screenshots leaked into the
+            # map pool; their episodes are garbage. Signatures measured on the
+            # source maps: black_arena water .92 + land-thin .48 (text strokes);
+            # white_arena water .004; real watery maps (island_kingdom) thin .12.
+            lab0 = d["lab"][:: max(1, len(d["lab"]) // 8)]
+            wm = (lab0 == 0).mean()
+            lm = (lab0 == 1)
+            core = lm[:, 1:-1, 1:-1]
+            er = (core & lm[:, :-2, 1:-1] & lm[:, 2:, 1:-1]
+                  & lm[:, 1:-1, :-2] & lm[:, 1:-1, 2:])
+            thin = 1 - er.sum() / max(lm.sum(), 1)
+            if wm < 0.05 or (wm > 0.88 and thin > 0.35):
+                print("skip arena-map shard", sp.name,
+                      f"water={wm:.2f} thin={thin:.2f}")
+                continue
             rgb = d["rgb"]
             n = len(rgb)
             for i in range(0, n, bs):

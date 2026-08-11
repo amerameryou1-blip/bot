@@ -51,16 +51,18 @@ def main():
         from PIL import Image
         import shutil
         api = HfApi(token=tok)
+        plist_early = (json.load(open(PENDING)) if PENDING.exists() else {})
         fs = sorted(f for f in api.list_repo_files(
             HF_DATASET, repo_type="dataset", token=tok)
             if f.startswith("rl/shards_v2/"))
-        pending = [f for f in fs if Path(f).name not in ledger["files"]]
+        pending = [f for f in fs if Path(f).name not in ledger["files"]
+                   and Path(f).name not in plist_early]
         print(f"HF shards: {len(fs)}, reviewed: {len(fs)-len(pending)}, "
               f"pending: {len(pending)}")
         REVIEW_DIR.mkdir(parents=True, exist_ok=True)
         EYE_DIR.mkdir(parents=True, exist_ok=True)
-        plist = json.load(open(PENDING)) if PENDING.exists() else {}
-        for f in pending[:40]:  # per-pass cap keeps up with ~0.7 GB/h fleet
+        plist = plist_early
+        for f in pending[:100]:  # per-pass cap keeps up with ~0.7 GB/h fleet
             name = Path(f).name
             p = hf_hub_download(HF_DATASET, f, repo_type="dataset", token=tok)
             dst = REVIEW_DIR / name
@@ -74,17 +76,59 @@ def main():
                 continue
             d = np.load(dst)
             rgb, lens = d["rgb"], d["lens"]
+            lab = d["lab"]
             rec_per_ep = [max(1, int(l) // 2) for l in lens]
+            # objective eyeball-proxy stats on 2 mid frames (every shard)
+            stats = []
             off = 0
             for e in range(min(len(lens), 2)):
                 mid = off + rec_per_ep[e] // 2
                 if mid < rgb.shape[0]:
                     out = EYE_DIR / f"{Path(f).stem}_ep{e}.png"
+                    from PIL import Image
                     Image.fromarray(rgb[mid]).save(out)
                     print(f"EYEBALL {out}")
+                    m = lab[mid]
+                    cls = {int(c): float((m == c).mean()) for c in (0, 1, 2, 3)}
+                    en = (m == 3)
+                    core = en[1:-1, 1:-1]
+                    er = (core & en[:-2, 1:-1] & en[2:, 1:-1]
+                          & en[1:-1, :-2] & en[1:-1, 2:])
+                    thin = 1.0 - (er.sum() / max(en.sum(), 1))
+                    lm = (m == 1)
+                    lcore = lm[1:-1, 1:-1]
+                    ler = (lcore & lm[:-2, 1:-1] & lm[2:, 1:-1]
+                           & lm[1:-1, :-2] & lm[1:-1, 2:])
+                    land_thin = 1.0 - (ler.sum() / max(lm.sum(), 1))
+                    arena = (cls[0] < 0.05
+                             or (cls[0] > 0.88 and land_thin > 0.35))
+                    stats.append({"water": round(cls[0], 3),
+                                  "land": round(cls[1], 3),
+                                  "me": round(cls[2], 3),
+                                  "enemy": round(cls[3], 3),
+                                  "thin_line_frac": round(float(thin), 2),
+                                  "arena": bool(arena)})
                 off += rec_per_ep[e]
+            # frame sanity: every frame has land and is not single-colored
+            sane = bool(((lab == 1).sum(axis=(1, 2)) > 100).all())
+            flags = []
+            for i, s in enumerate(stats):
+                if s["thin_line_frac"] > 0.85:
+                    flags.append(f"ep{i}:all-thin-lines")
+                if s["enemy"] > 0.45:
+                    flags.append(f"ep{i}:enemy-flood")
+                if s["me"] == 0 and s["enemy"] == 0:
+                    flags.append(f"ep{i}:no-players")
+                if s["water"] > 0.95:
+                    flags.append(f"ep{i}:all-water")
+            if flags:
+                print(f"FLAG {name}: {flags}")
+            is_arena = any(s.get("arena") for s in stats)
+            if is_arena:
+                print(f"ARENA-MAP {name} — excluded from reviewed pool")
             plist[name] = {"gb": dst.stat().st_size / 1e9,
-                           "status": "CLEAN"}
+                           "status": "ARENA" if is_arena else "CLEAN",
+                           "stats": stats, "sane": sane, "flags": flags}
             print(f"AUDIT-CLEAN {name} ({dst.stat().st_size/1e6:.1f} MB)")
             dst.unlink()  # keep /tmp small; ledger+plist are the record
         json.dump(plist, open(PENDING, "w"), indent=1)
@@ -101,6 +145,12 @@ def main():
         n = 0
         for name, rec in list(plist.items()):
             if rec["status"] != "CLEAN" or name in ledger["files"]:
+                continue
+            if not rec.get("sane", True):
+                print(f"skip {name}: frame sanity failed")
+                continue
+            if rec.get("flags"):
+                print(f"skip {name}: needs agent eyes {rec['flags']}")
                 continue
             ledger["files"][name] = {"gb": round(rec["gb"], 4),
                                      "ts": int(time.time()),
