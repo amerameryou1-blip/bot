@@ -51,7 +51,7 @@ def v2_gb():
 
 def main():
     t0 = time.time()
-    end = t0 + 14 * 3600
+    end = t0 + 36 * 3600
     while time.time() < end:
         if os.path.exists(MARK):
             return
