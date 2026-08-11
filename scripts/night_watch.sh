@@ -2,7 +2,7 @@
 # Overnight loop-keeper: every 30 min, relaunch any dead RL kernels and
 # ferry pending recordings (watchdog handles both). Runs ~12h.
 cd "$(dirname "$0")/.." || exit 1
-end=$(( $(date +%s) + 12 * 3600 ))
+end=$(( $(date +%s) + 36 * 3600 ))
 while [ "$(date +%s)" -lt "$end" ]; do
   echo "== watchdog $(date +%H:%M) ==" >> /tmp/night_watch.log
   python3 scripts/watchdog_loop.py --relaunch >> /tmp/night_watch.log 2>&1

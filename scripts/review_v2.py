@@ -60,7 +60,7 @@ def main():
         REVIEW_DIR.mkdir(parents=True, exist_ok=True)
         EYE_DIR.mkdir(parents=True, exist_ok=True)
         plist = json.load(open(PENDING)) if PENDING.exists() else {}
-        for f in pending[:12]:  # per-pass cap keeps latency sane
+        for f in pending[:40]:  # per-pass cap keeps up with ~0.7 GB/h fleet
             name = Path(f).name
             p = hf_hub_download(HF_DATASET, f, repo_type="dataset", token=tok)
             dst = REVIEW_DIR / name
