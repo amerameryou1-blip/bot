@@ -104,6 +104,10 @@ def main():
                 code = (L.TRAINER_BOOT.replace("@@HF@@", hf)
                         .replace("@@REPO@@", L.GH_REPO_URL)
                         .replace("@@HOURS@@", "9.0").replace("@@DELAY@@", "0"))
+            elif k.startswith("rl-v3-worker"):
+                code = (L.HD_WORKER_BOOT.replace("@@HF@@", hf)
+                        .replace("@@REPO@@", L.GH_REPO_URL)
+                        .replace("@@HOURS@@", "8.5"))
             elif k.startswith("rl-v2-worker"):
                 code = (L.V2_WORKER_BOOT.replace("@@HF@@", hf)
                         .replace("@@REPO@@", L.GH_REPO_URL)
