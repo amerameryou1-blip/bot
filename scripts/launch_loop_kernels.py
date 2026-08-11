@@ -47,6 +47,14 @@ V2_WORKER_BOOT = WORKER_BOOT.replace(
     'os.environ["FLUSH_S"] = "1200"\nos.environ["V2_SIZE"] = "192"\n'
     'os.environ["REC_EVERY"] = "2"')
 
+# HD fleet (2026-08-11): 256px eyes per locked blueprint, rec_every=2 for
+# +50% data/h, 4 eps/shard, flush every 20 min. Slugs: rl-v3-worker-1..5.
+HD_WORKER_BOOT = WORKER_BOOT.replace(
+    'os.environ["EP_PER_SHARD"] = "10"',
+    'os.environ["V2"] = "1"\nos.environ["V2_EP"] = "4"\n'
+    'os.environ["FLUSH_S"] = "1200"\nos.environ["V2_SIZE"] = "256"\n'
+    'os.environ["REC_EVERY"] = "2"')
+
 TRAINER_BOOT = '''import os, sys, subprocess, time
 os.environ.setdefault("HF_TOKEN", "@@HF@@")
 print("trainer boot (CPU — GPU saved for final pushes; delayed @@DELAY@@min)", flush=True)
@@ -99,11 +107,14 @@ def push_kernel(slug: str, title: str, code: str, gpu: bool = False) -> str:
 def main():
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--workers", type=int, default=3)
+    ap.add_argument("--workers", type=int, default=5)
+    ap.add_argument("--first", type=int, default=1,
+                    help="first worker index to push (test-one-first rule)")
     ap.add_argument("--worker-hours", type=float, default=8.5)
     ap.add_argument("--trainer-hours", type=float, default=9.0)
     ap.add_argument("--trainer-delay-min", type=int, default=40)
     ap.add_argument("--trainer-only", action="store_true")
+    ap.add_argument("--with-trainer", action="store_true")
     a = ap.parse_args()
 
     hf = os.environ.get("HF_TOKEN", "").strip()
@@ -111,17 +122,18 @@ def main():
         print("HF_TOKEN required (injected into private kernels)"); sys.exit(1)
 
     if not a.trainer_only:
-        for i in range(1, a.workers + 1):
-            code = (WORKER_BOOT.replace("@@HF@@", hf).replace("@@REPO@@", GH_REPO_URL)
+        for i in range(a.first, a.workers + 1):
+            code = (HD_WORKER_BOOT.replace("@@HF@@", hf).replace("@@REPO@@", GH_REPO_URL)
                     .replace("@@HOURS@@", str(a.worker_hours)))
             # title == slug so re-pushes update the SAME kernel
-            out = push_kernel(f"rl-loop-worker-{i}", f"rl-loop-worker-{i}", code)
-            print(f"pushed rl-loop-worker-{i}: {out[:160]}", flush=True)
-    code = (TRAINER_BOOT.replace("@@HF@@", hf).replace("@@REPO@@", GH_REPO_URL)
-            .replace("@@HOURS@@", str(a.trainer_hours))
-            .replace("@@DELAY@@", str(a.trainer_delay_min)))
-    out = push_kernel("rl-loop-trainer-cpu", "rl-loop-trainer-cpu", code)
-    print(f"pushed rl-loop-trainer-cpu: {out[:160]}", flush=True)
+            out = push_kernel(f"rl-v3-worker-{i}", f"rl-v3-worker-{i}", code)
+            print(f"pushed rl-v3-worker-{i}: {out[:160]}", flush=True)
+    if a.trainer_only or a.with_trainer:
+        code = (TRAINER_BOOT.replace("@@HF@@", hf).replace("@@REPO@@", GH_REPO_URL)
+                .replace("@@HOURS@@", str(a.trainer_hours))
+                .replace("@@DELAY@@", str(a.trainer_delay_min)))
+        out = push_kernel("rl-loop-trainer-cpu", "rl-loop-trainer-cpu", code)
+        print(f"pushed rl-loop-trainer-cpu: {out[:160]}", flush=True)
 
 
 if __name__ == "__main__":

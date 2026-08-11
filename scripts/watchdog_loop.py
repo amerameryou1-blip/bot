@@ -15,8 +15,7 @@ import argparse
 # fleet = 3 workers + CPU trainer + CPU v15 = exactly the 5-CPU cap
 # (Kaggle enforces it server-side; stay AT it, never over — user TOS check
 # 2026-08-08: CPU batch cap 5, GPU cap 2, separate pools)
-KERNELS = ([f"rl-loop-worker-{i}" for i in range(1, 4)]
-           + [f"rl-v2-worker-{i}" for i in (1, 2, 3, 4, 5)]
+KERNELS = ([f"rl-v3-worker-{i}" for i in range(1, 6)]
            + ["rl-loop-trainer-cpu"])
 ALIVE = ("RUNNING", "QUEUED")
 
