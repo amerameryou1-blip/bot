@@ -7,6 +7,12 @@ must WIN AS **LAST SURVIVOR** (by elimination — NOT biggest area).
 
 ---
 
+> ## 🌙 EVENING SESSION (2026-08-11, autonomous, pre-sleep)
+> - 🚨 **Arena-map incident found & fixed**: `black_arena`/`white_arena` in the map pool were LOBBY SCREENSHOTS, not game maps (92% water + watermark text pixels / 99.6% land). ~18% of episodes were garbage. Fixes: both maps gated FAIL in `maps_meta.json`; trainer (`train_v2._batches`) and review pipeline now auto-detect arena signatures (water<5% or water>88%+thin-text-land>35%) and exclude them.
+> - 🧹 **Ledger scrubbed**: 83 already-committed arena shards (0.53 GB) removed from the reviewed ledger. Clean reviewed = **4.4 GB** of 15 GB gate.
+> - ⚖️ **CONTROLLED BASELINE RUN (brutal honesty, scripts/eval_baseline.py)**: full-game mixed 10-bot lobbies, last-survivor only — NET: WR 0.00, alive 0.00, avg rank 9.5; RANDOM policy: WR 0.00, alive 0.00, rank 8.3. **The current 2M brain is NOT better than random in full games.** Its 45% alive stat came from short capped episodes in easier lobbies. Grade today: 1-2/10. The 100M teacher + PPO stages are the only path to winning; the farmer is a data engine, not the fighter.
+> - 🔁 Fleet: workers 1-3 relaunched on fixed code; 4-5 relaunch next watchdog cycle; CPU trainer queued for a free slot (self-improvement loop).
+
 > ## 📡 SESSION (2026-08-11, autonomous)
 > - 🔑 **Old Kaggle API key died (401 everywhere).** User rotated it live; new key installed; all fleet calls work again.
 > - 🖥 **5× HD workers relaunched** (`rl-v3-worker-1..5`, 256px eyes, rec_every=2, 4 eps/shard, flush every 20 min). Test-one-first rule honored: worker-1 verified RUNNING before scaling to 5.
