@@ -7,6 +7,16 @@ must WIN AS **LAST SURVIVOR** (by elimination — NOT biggest area).
 
 ---
 
+> ## 📡 SESSION (2026-08-11, autonomous)
+> - 🔑 **Old Kaggle API key died (401 everywhere).** User rotated it live; new key installed; all fleet calls work again.
+> - 🖥 **5× HD workers relaunched** (`rl-v3-worker-1..5`, 256px eyes, rec_every=2, 4 eps/shard, flush every 20 min). Test-one-first rule honored: worker-1 verified RUNNING before scaling to 5.
+> - 🐢 **2 sandbox stopgap workers** running locally in parallel so data never stops, even when Kaggle is down.
+> - 👁 **Review pipeline alive**: local shards audited CLEAN + eyeballed (sharp 256px coasts, correct player tints). Reviewed ledger = 0.06 GB (counts local + HF shards, no double count).
+> - 🚦 **GPU gate unchanged**: autopilot polls HF; only launches T4x2 teacher pretrain when HF data ≥15 GB AND I have personally reviewed the data (`/tmp/review_ok`). Window now 36h.
+> - 🐛 **Fixed**: launcher was still pushing old v1 boot; watchdog relaunch would have used v1 for v3 slugs; both now use HD boot. Stale duplicate local commits dropped (origin was already ahead).
+
+---
+
 > ## ⚡ OVERNIGHT SESSION PROGRESS (2026-08-07→08, autonomous)
 > - ✅ **Zoom blocker FIXED** — numeric proof: self blob 0.3-0.5% → 1.2-1.9% in window, ≥2 enemies; ~80% PASS by batch 3-4
 > - ✅ **25 real matches recorded** (~5,500 frames + clicks) → HF `recordings/` (b1-b4 verified; b5 recording)
