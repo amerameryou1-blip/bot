@@ -84,6 +84,13 @@ def main():
             dead.append(k)
     push_trainer_best_effort()
     tidy_old_shards()
+    # pre-fetch unaudited HF shards for the agent's morning review
+    try:
+        subprocess.run([sys.executable,
+                        os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "review_v2.py"), "--fetch"], timeout=900)
+    except Exception as e:
+        print(f"review fetch skipped: {e}", flush=True)
     if a.relaunch and dead:
         # a CPU slot just freed -> ferry any recordings zips waiting on GH
         try:
