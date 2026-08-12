@@ -312,21 +312,9 @@ def mode_trainer(hours):
         if api:
             try:
                 files = api.list_repo_files(HF_DATASET, repo_type="dataset", token=tok)
-                new = [f for f in files
-                       if f.startswith("rl/shards/shard_rl_") and f.endswith(".npz")
-                       and not (SHARDS / Path(f).name).exists()
-                       and not (DONE / Path(f).name).exists()]
-                for f in new[:8]:
-                    p = api.hf_hub_download(repo_id=HF_DATASET, repo_type="dataset",
-                                            filename=f, token=tok)
-                    # shutil.move: os.replace fails cross-device on Kaggle
-                    # (cache on /root, working dir on /kaggle) — the bug that
-                    # spun the trainer idle for hours (found 2026-08-09)
-                    shutil.move(p, str(SHARDS / Path(f).name))
-                if new:
-                    log(f"pulled {len(new)} new shards from HF")
-                # HD/v2 shards (2026-08-12 fix): the self-improve loop was
-                # only looking at retired v1 shards -> spun idle for days.
+                # v1 shard_rl_* pool is RETIRED — never look at it again
+                # (ghost broken symlinks spun the trainer in a 2s loop,
+                #  2026-08-12)
                 new2 = [f for f in files
                         if f.startswith("rl/shards_v2/") and f.endswith(".npz")
                         and not (SHARDS_V2 / Path(f).name).exists()
@@ -335,32 +323,30 @@ def mode_trainer(hours):
                     p = api.hf_hub_download(repo_id=HF_DATASET,
                                             repo_type="dataset",
                                             filename=f, token=tok)
-                    shutil.move(p, str(SHARDS_V2 / Path(f).name))
+                    # copyfile, not move: hf returns cache SYMLINKS; moving
+                    # them left broken links that poisoned the glob
+                    shutil.copyfile(p, str(SHARDS_V2 / Path(f).name))
                 if new2:
                     log(f"pulled {len(new2)} HD shards from HF")
             except Exception as e:
                 log(f"shard pull skipped ({str(e)[:60]})")
-        pending = sorted(SHARDS.glob("shard_*.npz"))
+        for p in SHARDS_V2.glob("shard_v2_*.npz"):
+            if p.is_symlink() or not p.exists():
+                p.unlink(missing_ok=True)   # broken links from old versions
         pending_v2 = sorted(SHARDS_V2.glob("shard_v2_*.npz"))
-        if not pending and not pending_v2:
+        if not pending_v2:
             time.sleep(30)
             continue
         episodes = []
-        for p in pending:
-            try:
-                episodes += unpack_episodes(np.load(p))
-            except Exception as e:
-                log(f"bad shard {p.name}: {e}")
         for p in pending_v2:
             try:
                 episodes += unpack_v2_episodes(np.load(p))
             except Exception as e:
                 log(f"bad v2 shard {p.name}: {e}")
         if not episodes:
-            for p in pending:
-                p.rename(DONE / p.name)
             for p in pending_v2:
                 p.rename(DONE_V2 / p.name)
+            time.sleep(30)
             continue
         # cap the PPO batch: 2M-param PPO is heavy on CPU; more iterations
         # with fresher data beats giant slow ones (measured 2026-08-09)
@@ -378,7 +364,7 @@ def mode_trainer(hours):
                               silent=True)
         log(f"[hb] trained loss={loss:.3f} wr={wr:.2f} rank={rank:.2f} "
             f"({time.time()-t_it:.0f}s)")
-        msg = (f"trainer iter: shards={len(pending)} episodes={len(episodes)} "
+        msg = (f"trainer iter: shards={len(pending_v2)} episodes={len(episodes)} "
                f"loss={loss:.3f} | LAST-SURVIVOR wr={wr:.2f} rank={rank:.2f} "
                f"(best {best['wr']:.2f})")
         if wr >= best["wr"]:
@@ -390,34 +376,10 @@ def mode_trainer(hours):
         log(msg)
         _hb("iter_done", t_it, loss=round(float(loss), 4),
             wr=round(float(wr), 3), rank=round(float(rank), 2),
-            shards=len(pending))
-        consumed = [p.name for p in pending]
-        for p in pending:
-            p.rename(DONE / p.name)
+            shards=len(pending_v2))
         # v2 shards stay ON HF (teacher needs them); only local move to done
         for p in pending_v2:
             p.rename(DONE_V2 / p.name)
-        # storage hygiene (user 2026-08-08): experience is now IN the weights —
-        # delete consumed shards from HF in ONE commit so the repo stays lean.
-        # (DeleteFiles was renamed across hub versions — detect defensively.)
-        try:
-            api_del, tok_del = _hf_api()
-            if api_del:
-                import huggingface_hub as _h
-                op = None
-                for nm in ("DeleteFiles", "CommitOperationDelete",
-                           "CommitOperationDeleteFile"):
-                    if hasattr(_h, nm):
-                        op = getattr(_h, nm)
-                        break
-                if op:
-                    api_del.create_commit(
-                        repo_id=HF_DATASET, repo_type="dataset", token=tok_del,
-                        commit_message="consume shards",
-                        operations=[op(path_in_repo=f"rl/shards/{n}")
-                                    for n in consumed])
-        except Exception as e:
-            log(f"shard delete commit failed ({str(e)[:60]})")
     log("trainer hours exhausted — exiting")
 
 
