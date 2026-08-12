@@ -71,37 +71,40 @@ def _batches(shards, bs, epochs):
             except Exception as e:
                 print("skip bad shard", sp.name, str(e)[:60])
                 continue
-            # arena-map filter (2026-08-11): lobby screenshots leaked into the
-            # map pool; their episodes are garbage. Signatures measured on the
-            # source maps: black_arena water .92 + land-thin .48 (text strokes);
-            # white_arena water .004; real watery maps (island_kingdom) thin .12.
-            lab0 = d["lab"][:: max(1, len(d["lab"]) // 8)]
-            wm = (lab0 == 0).mean()
-            lm = (lab0 == 1)
-            core = lm[:, 1:-1, 1:-1]
-            er = (core & lm[:, :-2, 1:-1] & lm[:, 2:, 1:-1]
-                  & lm[:, 1:-1, :-2] & lm[:, 1:-1, 2:])
-            thin = 1 - er.sum() / max(lm.sum(), 1)
-            if wm < 0.05 or (wm > 0.88 and thin > 0.35):
-                print("skip arena-map shard", sp.name,
-                      f"water={wm:.2f} thin={thin:.2f}")
+            # arena-episode filter (2026-08-12): lobby-screenshot maps leaked
+            # into the pool AND a seeding bug made every worker replay the same
+            # map sequence (slot0=black_arena). Filter per EPISODE, keep the
+            # good 75% of each shard. Signatures: black_arena water .92 +
+            # land-thin .48; white_arena water .004; real watery maps thin .12.
+            from audit_data import arena_eps_of
+            lens = d["lens"]
+            ae = arena_eps_of(d["lab"], lens)
+            if all(ae):
+                print("skip all-arena shard", sp.name)
                 continue
+            keep = np.concatenate([
+                np.zeros(max(1, int(l) // 2), dtype=bool) if a
+                else np.ones(max(1, int(l) // 2), dtype=bool)
+                for l, a in zip(lens, ae)])
             rgb = d["rgb"]
             n = len(rgb)
             for i in range(0, n, bs):
-                r = rgb[i:i + bs].transpose(0, 3, 1, 2).astype(np.float32) / 255.0
+                sel = np.nonzero(keep[i:i + bs])[0]
+                if len(sel) < 4:
+                    continue
+                r = rgb[i:i + bs][sel].transpose(0, 3, 1, 2).astype(np.float32) / 255.0
                 prev = np.concatenate([r[:1], r[:-1]])
                 diff = np.clip(r - prev, -1, 1) * 0.5 + 0.5
                 x = np.concatenate([r, diff], 1)
-                lab = d["lab"][i:i + bs]
+                lab = d["lab"][i:i + bs][sel]
                 g = r.shape[2] // 8
                 lab16 = torch.tensor(
                     _nn_resize(lab, g), dtype=torch.int64, device=DEVICE)
                 yield (torch.tensor(x, device=DEVICE), lab16,
-                       torch.tensor(d["nums"][i:i + bs], device=DEVICE),
-                       torch.tensor(d["cell"][i:i + bs], device=DEVICE),
-                       torch.tensor(d["kind"][i:i + bs], device=DEVICE),
-                       torch.tensor(d["pct"][i:i + bs], device=DEVICE))
+                       torch.tensor(d["nums"][i:i + bs][sel], device=DEVICE),
+                       torch.tensor(d["cell"][i:i + bs][sel], device=DEVICE),
+                       torch.tensor(d["kind"][i:i + bs][sel], device=DEVICE),
+                       torch.tensor(d["pct"][i:i + bs][sel], device=DEVICE))
 
 
 def _nn_resize(lab, size):

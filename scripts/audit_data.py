@@ -205,3 +205,29 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+def arena_eps_of(lab, lens):
+    """Per-episode True if that episode played on a lobby-screenshot map.
+    Signatures measured on source maps: black_arena water .92 + land-thin .48
+    (watermark text strokes); white_arena water .004; real watery maps
+    (island_kingdom) land-thin .12."""
+    rec = [max(1, int(l) // 2) for l in lens]
+    out = []
+    off = 0
+    for e in range(len(lens)):
+        n = rec[e]
+        mid = off + n // 2
+        a = False
+        if mid < lab.shape[0]:
+            m = lab[mid]
+            wm = float((m == 0).mean())
+            lm = (m == 1)
+            core = lm[1:-1, 1:-1]
+            er = (core & lm[:-2, 1:-1] & lm[2:, 1:-1]
+                  & lm[1:-1, :-2] & lm[1:-1, 2:])
+            thin = 1 - er.sum() / max(lm.sum(), 1)
+            a = wm < 0.05 or (wm > 0.88 and thin > 0.35)
+        out.append(bool(a))
+        off += n
+    return out

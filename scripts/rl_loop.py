@@ -450,6 +450,10 @@ def mode_worker_v2(hours):
     """Farmer for the 100M teacher: records 128px bundles + labels + numbers.
     Actions come from the current best net (any size that fits _policy_action
     via 64px); the BUNDLE is what the teacher learns from."""
+    # BUGFIX 2026-08-12: train_nn seeds np.random(2026) at import, so every
+    # worker drew the SAME map sequence (slot 0 = black_arena forever).
+    # Reseed per process for real map variety.
+    np.random.seed((os.getpid() * 2654435761 + int(time.time())) % 2**31)
     t_end = time.time() + hours * 3600
     ep_per = int(os.environ.get("V2_EP", "4"))
     flush_s = float(os.environ.get("FLUSH_S", "1200"))

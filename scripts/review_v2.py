@@ -77,59 +77,60 @@ def main():
             d = np.load(dst)
             rgb, lens = d["rgb"], d["lens"]
             lab = d["lab"]
+            from audit_data import arena_eps_of
+            ae = arena_eps_of(lab, lens)
+            good = [e for e, a in enumerate(ae) if not a]
+            if not good:
+                print(f"ARENA-MAP {name} — all episodes on lobby maps")
+                plist[name] = {"gb": dst.stat().st_size / 1e9,
+                               "status": "ARENA", "stats": [], "sane": True,
+                               "flags": [], "clean_frac": 0.0}
+                dst.unlink()
+                continue
             rec_per_ep = [max(1, int(l) // 2) for l in lens]
-            # objective eyeball-proxy stats on 2 mid frames (every shard)
+            # objective eyeball-proxy stats on mid frames of GOOD episodes
             stats = []
-            off = 0
-            for e in range(min(len(lens), 2)):
-                mid = off + rec_per_ep[e] // 2
-                if mid < rgb.shape[0]:
-                    out = EYE_DIR / f"{Path(f).stem}_ep{e}.png"
-                    from PIL import Image
-                    Image.fromarray(rgb[mid]).save(out)
-                    print(f"EYEBALL {out}")
-                    m = lab[mid]
-                    cls = {int(c): float((m == c).mean()) for c in (0, 1, 2, 3)}
-                    en = (m == 3)
-                    core = en[1:-1, 1:-1]
-                    er = (core & en[:-2, 1:-1] & en[2:, 1:-1]
-                          & en[1:-1, :-2] & en[1:-1, 2:])
-                    thin = 1.0 - (er.sum() / max(en.sum(), 1))
-                    lm = (m == 1)
-                    lcore = lm[1:-1, 1:-1]
-                    ler = (lcore & lm[:-2, 1:-1] & lm[2:, 1:-1]
-                           & lm[1:-1, :-2] & lm[1:-1, 2:])
-                    land_thin = 1.0 - (ler.sum() / max(lm.sum(), 1))
-                    arena = (cls[0] < 0.05
-                             or (cls[0] > 0.88 and land_thin > 0.35))
-                    stats.append({"water": round(cls[0], 3),
-                                  "land": round(cls[1], 3),
-                                  "me": round(cls[2], 3),
-                                  "enemy": round(cls[3], 3),
-                                  "thin_line_frac": round(float(thin), 2),
-                                  "arena": bool(arena)})
-                off += rec_per_ep[e]
+            for e in good[:2]:
+                off0 = sum(rec_per_ep[:e])
+                mid = off0 + rec_per_ep[e] // 2
+                if mid >= rgb.shape[0]:
+                    continue
+                out = EYE_DIR / f"{Path(f).stem}_ep{e}.png"
+                from PIL import Image
+                Image.fromarray(rgb[mid]).save(out)
+                print(f"EYEBALL {out}")
+                m = lab[mid]
+                cls = {int(c): float((m == c).mean()) for c in (0, 1, 2, 3)}
+                en = (m == 3)
+                core = en[1:-1, 1:-1]
+                er = (core & en[:-2, 1:-1] & en[2:, 1:-1]
+                      & en[1:-1, :-2] & en[1:-1, 2:])
+                thin = 1.0 - (er.sum() / max(en.sum(), 1))
+                stats.append({"ep": e, "water": round(cls[0], 3),
+                              "land": round(cls[1], 3),
+                              "me": round(cls[2], 3),
+                              "enemy": round(cls[3], 3),
+                              "thin_line_frac": round(float(thin), 2)})
             # frame sanity: every frame has land and is not single-colored
             sane = bool(((lab == 1).sum(axis=(1, 2)) > 100).all())
             flags = []
-            for i, s in enumerate(stats):
+            for s in stats:
                 if s["thin_line_frac"] > 0.85:
-                    flags.append(f"ep{i}:all-thin-lines")
+                    flags.append(f"ep{s['ep']}:all-thin-lines")
                 if s["enemy"] > 0.45:
-                    flags.append(f"ep{i}:enemy-flood")
+                    flags.append(f"ep{s['ep']}:enemy-flood")
                 if s["me"] == 0 and s["enemy"] == 0:
-                    flags.append(f"ep{i}:no-players")
+                    flags.append(f"ep{s['ep']}:no-players")
                 if s["water"] > 0.95:
-                    flags.append(f"ep{i}:all-water")
+                    flags.append(f"ep{s['ep']}:all-water")
             if flags:
                 print(f"FLAG {name}: {flags}")
-            is_arena = any(s.get("arena") for s in stats)
-            if is_arena:
-                print(f"ARENA-MAP {name} — excluded from reviewed pool")
+            clean_frac = round(len(good) / len(ae), 3)
             plist[name] = {"gb": dst.stat().st_size / 1e9,
-                           "status": "ARENA" if is_arena else "CLEAN",
-                           "stats": stats, "sane": sane, "flags": flags}
-            print(f"AUDIT-CLEAN {name} ({dst.stat().st_size/1e6:.1f} MB)")
+                           "status": "CLEAN", "stats": stats, "sane": sane,
+                           "flags": flags, "clean_frac": clean_frac}
+            print(f"AUDIT-CLEAN {name} ({dst.stat().st_size/1e6:.1f} MB, "
+                  f"{clean_frac*100:.0f}% clean eps)")
             dst.unlink()  # keep /tmp small; ledger+plist are the record
         json.dump(plist, open(PENDING, "w"), indent=1)
         # keep only newest 16 eyeball PNGs so /tmp stays small
@@ -152,10 +153,12 @@ def main():
             if rec.get("flags"):
                 print(f"skip {name}: needs agent eyes {rec['flags']}")
                 continue
-            ledger["files"][name] = {"gb": round(rec["gb"], 4),
+            cg = rec["gb"] * rec.get("clean_frac", 1.0)
+            ledger["files"][name] = {"gb": round(cg, 4),
                                      "ts": int(time.time()),
-                                     "checks": "audit_clean+eyeballed"}
-            added += rec["gb"]
+                                     "checks": "audit_clean+eyeballed",
+                                     "clean_frac": rec.get("clean_frac", 1.0)}
+            added += cg
             n += 1
             del plist[name]
         ledger["total_gb"] = round(ledger["total_gb"] + added, 4)
