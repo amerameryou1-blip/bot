@@ -325,10 +325,24 @@ def mode_trainer(hours):
                     shutil.move(p, str(SHARDS / Path(f).name))
                 if new:
                     log(f"pulled {len(new)} new shards from HF")
+                # HD/v2 shards (2026-08-12 fix): the self-improve loop was
+                # only looking at retired v1 shards -> spun idle for days.
+                new2 = [f for f in files
+                        if f.startswith("rl/shards_v2/") and f.endswith(".npz")
+                        and not (SHARDS_V2 / Path(f).name).exists()
+                        and not (DONE_V2 / Path(f).name).exists()]
+                for f in new2[:8]:
+                    p = api.hf_hub_download(repo_id=HF_DATASET,
+                                            repo_type="dataset",
+                                            filename=f, token=tok)
+                    shutil.move(p, str(SHARDS_V2 / Path(f).name))
+                if new2:
+                    log(f"pulled {len(new2)} HD shards from HF")
             except Exception as e:
                 log(f"shard pull skipped ({str(e)[:60]})")
         pending = sorted(SHARDS.glob("shard_*.npz"))
-        if not pending:
+        pending_v2 = sorted(SHARDS_V2.glob("shard_v2_*.npz"))
+        if not pending and not pending_v2:
             time.sleep(30)
             continue
         episodes = []
@@ -337,9 +351,16 @@ def mode_trainer(hours):
                 episodes += unpack_episodes(np.load(p))
             except Exception as e:
                 log(f"bad shard {p.name}: {e}")
+        for p in pending_v2:
+            try:
+                episodes += unpack_v2_episodes(np.load(p))
+            except Exception as e:
+                log(f"bad v2 shard {p.name}: {e}")
         if not episodes:
             for p in pending:
                 p.rename(DONE / p.name)
+            for p in pending_v2:
+                p.rename(DONE_V2 / p.name)
             continue
         # cap the PPO batch: 2M-param PPO is heavy on CPU; more iterations
         # with fresher data beats giant slow ones (measured 2026-08-09)
@@ -373,6 +394,9 @@ def mode_trainer(hours):
         consumed = [p.name for p in pending]
         for p in pending:
             p.rename(DONE / p.name)
+        # v2 shards stay ON HF (teacher needs them); only local move to done
+        for p in pending_v2:
+            p.rename(DONE_V2 / p.name)
         # storage hygiene (user 2026-08-08): experience is now IN the weights —
         # delete consumed shards from HF in ONE commit so the repo stays lean.
         # (DeleteFiles was renamed across hub versions — detect defensively.)
@@ -446,6 +470,66 @@ def pack_v2(rec):
     )
 
 
+def _true_logp(net, act, game):
+    """Log-prob of the TAKEN action under the current net (needed for real
+    PPO later; the old -2.0 placeholder made v2 shards unusable for PPO)."""
+    dev = next(net.parameters()).device
+    rgb, _ = game.frame_tensor(1, size=64)
+    x = torch.tensor(rgb.transpose(2, 0, 1)[None], dtype=torch.float32,
+                     device=dev) / 255.0
+    with torch.no_grad():
+        click, kind, _p, _v = net.forward(x, None)
+        pk = T.F.softmax(kind[0], dim=-1)
+        ki = {"expand": 0, "attack": 1, "bank": 2}[act.kind]
+        lp = float(torch.log(pk[ki] + 1e-9))
+        if ki != 2 and act.x is not None:
+            cx = min(15, max(0, int(act.x / game.w * 16)))
+            cy = min(15, max(0, int(act.y / game.h * 16)))
+            pc = T.F.softmax(click[0], dim=-1)
+            lp += float(torch.log(pc[cy * 16 + cx] + 1e-9))
+    return lp
+
+
+def unpack_v2_episodes(shard):
+    """HD shards -> farmer-PPO episodes: rgb 256->64 (4x4 mean pool),
+    nums[8] -> ctx[3] (me_frac, e1_frac, red), cell 32x32 -> 16x16,
+    arena-map episodes dropped."""
+    from audit_data import arena_eps_of
+    eps = []
+    rgb = shard["rgb"]
+    n, h, w, c = rgb.shape
+    rgb64 = (rgb.reshape(n, 64, 4, 64, 4, 3).mean(axis=(2, 4))
+             .astype(np.float32) / 255.0).transpose(0, 3, 1, 2)  # CHW like v1
+    nums = shard["nums"]
+    ctx = nums[:, [1, 3, 2]].astype(np.float32)
+    cell32 = shard["cell"]
+    cy, cx = cell32 // 32, cell32 % 32
+    cell16 = (cy // 2) * 16 + (cx // 2)
+    ae = arena_eps_of(shard["lab"], shard["lens"])
+    rec = [max(1, int(l) // 2) for l in shard["lens"]]
+    off_r = 0
+    off_s = 0
+    for i, L in enumerate(shard["lens"]):
+        r = rec[i]
+        if not ae[i] and r >= 3:
+            # obs were recorded every 2nd tick; rewards every tick.
+            # Upsample obs x2 (last obs reused) so lengths align exactly.
+            rep = lambda a: a[np.minimum(np.arange(L) // 2, a.shape[0] - 1)]
+            eps.append({
+                "rgb": rep(rgb64[off_r:off_r + r]),
+                "ctx": rep(ctx[off_r:off_r + r]),
+                "kind": rep(shard["kind"][off_r:off_r + r]),
+                "cell": rep(cell16[off_r:off_r + r]),
+                "pct": rep(shard["pct"][off_r:off_r + r]),
+                "logp": rep(shard["logp"][off_r:off_r + r]),
+                "reward": shard["reward"][off_s:off_s + L],
+                "alive": bool(shard["alive"][i]),
+            })
+        off_r += r
+        off_s += L
+    return eps
+
+
 def mode_worker_v2(hours):
     """Farmer for the 100M teacher: records 128px bundles + labels + numbers.
     Actions come from the current best net (any size that fits _policy_action
@@ -488,7 +572,7 @@ def mode_worker_v2(hours):
                     rec["kind"].append({"expand": 0, "attack": 1, "bank": 2}[act.kind])
                     rec["cell"].append(_cell_of(act, game, GRID))
                     rec["pct"].append(float(pctv))
-                    rec["logp"].append(-2.0)
+                    rec["logp"].append(_true_logp(net, act, game))
                 area_before = int((game.world == 1).sum())
                 kills_before = game.players[1].kills
                 actions = {1: game._clicks_for(act, T.SIM["clicks_per_tick"])}
