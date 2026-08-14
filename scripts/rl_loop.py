@@ -367,7 +367,14 @@ def mode_trainer(hours):
         msg = (f"trainer iter: shards={len(pending_v2)} episodes={len(episodes)} "
                f"loss={loss:.3f} | LAST-SURVIVOR wr={wr:.2f} rank={rank:.2f} "
                f"(best {best['wr']:.2f})")
-        if wr >= best["wr"]:
+        # 2026-08-14 fix: old gate `wr >= best.wr` saved on TIES -> with the
+        # wr=0 plateau every round "won", flooding HF with a checkpoint every
+        # ~5 min and burning the commit budget workers need. Now: save only on
+        # a strict wr gain, or (at the wr=0 plateau) a rank jump >= 1.5, which
+        # is beyond 4-seed eval noise.
+        improved = (wr > best["wr"] + 1e-9) or \
+                   (abs(wr - best["wr"]) < 1e-9 and rank <= best["rank"] - 1.5)
+        if improved:
             ts = save_checkpoint(net, wr, rank)
             best = {"ts": ts, "wr": wr, "rank": rank, "source": "trainer"}
             msg += f" -> NEW BEST ts={ts}"
