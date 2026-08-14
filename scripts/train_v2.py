@@ -26,6 +26,7 @@ import torch
 import torch.nn.functional as F
 
 from nn.model_v2 import TeacherV2, StudentV2, count_params
+from nn.model_v3 import TeacherV3
 import rl_loop as R
 import train_nn as T
 
@@ -63,7 +64,10 @@ def pull_shards():
 
 
 def _batches(shards, bs, epochs):
-    for ep in range(epochs):
+    """v3 loader: rgb 256->128, stack cur+prev (memory), lab->32, native 32x32
+    cell, advantage weight w from episode returns (advantage-weighted BC).
+    Arena episodes still filtered (lobby-screenshot maps)."""
+    for ep_ in range(epochs):
         np.random.shuffle(shards)
         for sp in shards:
             try:
@@ -71,40 +75,51 @@ def _batches(shards, bs, epochs):
             except Exception as e:
                 print("skip bad shard", sp.name, str(e)[:60])
                 continue
-            # arena-episode filter (2026-08-12): lobby-screenshot maps leaked
-            # into the pool AND a seeding bug made every worker replay the same
-            # map sequence (slot0=black_arena). Filter per EPISODE, keep the
-            # good 75% of each shard. Signatures: black_arena water .92 +
-            # land-thin .48; white_arena water .004; real watery maps thin .12.
             from audit_data import arena_eps_of
             lens = d["lens"]
             ae = arena_eps_of(d["lab"], lens)
             if all(ae):
                 print("skip all-arena shard", sp.name)
                 continue
-            keep = np.concatenate([
-                np.zeros(max(1, int(l) // 2), dtype=bool) if a
-                else np.ones(max(1, int(l) // 2), dtype=bool)
-                for l, a in zip(lens, ae)])
             rgb = d["rgb"]
             n = len(rgb)
-            for i in range(0, n, bs):
-                sel = np.nonzero(keep[i:i + bs])[0]
-                if len(sel) < 4:
+            rgb128 = (rgb.reshape(n, 128, 2, 128, 2, 3).mean(axis=(2, 4))
+                      .astype(np.float32) / 255.0)
+            prev128 = np.concatenate([rgb128[:1], rgb128[:-1]])
+            x_all = np.concatenate([rgb128, prev128], 3)   # (N,128,128,6)
+            x_all = x_all.transpose(0, 3, 1, 2)            # (N,6,128,128)
+            lab32 = _nn_resize(d["lab"], 32)
+            rec = [max(1, int(l) // 2) for l in lens]
+            rets, off_s = [], 0
+            for i, L in enumerate(lens):
+                rets.append(float(d["reward"][off_s:off_s + L].sum()))
+                off_s += L
+            rets = np.array(rets)
+            med = np.median(rets); mad = np.median(np.abs(rets - med)) + 1e-6
+            w_ep = np.clip(0.5 + 1.5 * (rets - med) / mad, 0.25, 3.0)
+            w_rec = np.concatenate([np.full(rec[i], w_ep[i])
+                                    for i in range(len(lens))]).astype(np.float32)
+            off_r = 0
+            for i, L in enumerate(lens):
+                r = rec[i]
+                if ae[i] or r < 3:
+                    off_r += r
                     continue
-                r = rgb[i:i + bs][sel].transpose(0, 3, 1, 2).astype(np.float32) / 255.0
-                prev = np.concatenate([r[:1], r[:-1]])
-                diff = np.clip(r - prev, -1, 1) * 0.5 + 0.5
-                x = np.concatenate([r, diff], 1)
-                lab = d["lab"][i:i + bs][sel]
-                g = r.shape[2] // 8
-                lab16 = torch.tensor(
-                    _nn_resize(lab, g), dtype=torch.int64, device=DEVICE)
-                yield (torch.tensor(x, device=DEVICE), lab16,
-                       torch.tensor(d["nums"][i:i + bs][sel], device=DEVICE),
-                       torch.tensor(d["cell"][i:i + bs][sel], device=DEVICE),
-                       torch.tensor(d["kind"][i:i + bs][sel], device=DEVICE),
-                       torch.tensor(d["pct"][i:i + bs][sel], device=DEVICE))
+                for i0 in range(0, r, bs):
+                    s = slice(off_r + i0, off_r + min(r, i0 + bs))
+                    rr = x_all[s]
+                    if len(rr) < 4:
+                        continue
+                    yield (torch.tensor(rr, device=DEVICE),
+                           torch.tensor(lab32[s], dtype=torch.int64,
+                                        device=DEVICE),
+                           torch.tensor(d["nums"][s], device=DEVICE),
+                           torch.tensor(d["cell"][s], dtype=torch.int64,
+                                        device=DEVICE),
+                           torch.tensor(d["kind"][s], device=DEVICE),
+                           torch.tensor(d["pct"][s], device=DEVICE),
+                           torch.tensor(w_rec[s], device=DEVICE))
+                off_r += r
 
 
 def _nn_resize(lab, size):
@@ -123,23 +138,29 @@ def stage_sup(epochs=2, bs=16, lr=3e-4):
         return None
     if os.environ.get("SMOKE") == "1":
         shards = shards[:1]
-    net = TeacherV2().to(DEVICE)
+    net = TeacherV3().to(DEVICE)
     if torch.cuda.is_available() and torch.cuda.device_count() > 1:
         net = torch.nn.DataParallel(net)   # T4x2 ready
         print(f"[sup] DataParallel on {torch.cuda.device_count()} GPUs")
-    print(f"[sup] teacher {count_params(net)/1e6:.1f}M on {len(shards)} shards",
-          flush=True)
+    from nn.model_v3 import count_params as cp3
+    print(f"[sup] teacher-v3 {cp3(net.module if hasattr(net,'module') else net)/1e6:.1f}M "
+          f"on {len(shards)} shards (advantage-weighted BC)", flush=True)
     opt = T.make_optimizer(net)
     for ep in range(epochs):
         tot, nb = 0.0, 0
-        for x, lab16, nums, cell, kind, pct in _batches(shards, bs, 1):
-            seg, click, kd, pc, _ = net(x, nums, return_all=True)
-            loss = F.cross_entropy(seg, lab16, label_smoothing=0.05)
-            loss = loss + F.cross_entropy(click, cell) * 1.0
-            loss = loss + F.cross_entropy(kd, kind) * 0.5
+        for x, lab32, nums, cell, kind, pct, w in _batches(shards, bs, 1):
+            seg, click, kd, pc, _, aux = net(x, nums, return_all=True)
+            loss = F.cross_entropy(seg, lab32, label_smoothing=0.05)
+            loss = loss + (w * F.cross_entropy(click, cell,
+                                   reduction="none")).mean()
+            loss = loss + (w * F.cross_entropy(kd, kind,
+                                   reduction="none")).mean() * 0.5
             m = kind == 1
             if m.any():
-                loss = loss + F.mse_loss(pc[m], pct[m]) * 1.0
+                loss = loss + (w[m] * F.mse_loss(pc[m], pct[m],
+                                       reduction="none")).mean()
+            base = net.module if hasattr(net, "module") else net
+            loss = loss + 0.02 * aux.detach()
             if not opt.finite_ok(loss):
                 opt.zero_grad()
                 continue
@@ -157,6 +178,10 @@ def stage_sup(epochs=2, bs=16, lr=3e-4):
 
 
 def stage_distill(epochs=2, bs=16):
+    print("[distill] SKIPPED for now: teacher is v3 (1024-click/32-seg); the v2 "
+          "student heads don't match. Student redesign comes after teacher PPO.",
+          flush=True)
+    return None
     pull_shards()
     shards = _list_shards()
     if not shards or not TEACH_PT.exists():
@@ -215,15 +240,18 @@ if __name__ == "__main__":
 
 
 # ============================== PPO for the 100M teacher ====================
+def _down128(r):
+    """(1,3,256,256) -> (1,3,128,128) 2x2 mean pool."""
+    return r.reshape(r.shape[0], 3, 128, 2, 128, 2).mean(axis=(3, 5))
+
+
 def _bundle_x(game, prev, size=None):
     size = size or int(os.environ.get("V2_SIZE", "256"))
     rgb, lab, nums = game.frame_bundle(1, size)
-    r = rgb.transpose(2, 0, 1)[None].astype(np.float32) / 255.0
+    r = _down128(rgb.transpose(2, 0, 1)[None].astype(np.float32) / 255.0)
     if prev is None:
-        diff = np.full_like(r, 0.5)
-    else:
-        diff = np.clip(r - prev, -1, 1) * 0.5 + 0.5
-    x = np.concatenate([r, diff], 1)
+        prev = np.zeros_like(r)
+    x = np.concatenate([r, prev], 1)   # v3: cur+prev stack (memory)
     return torch.tensor(x, device=DEVICE), torch.tensor(
         nums[None], device=DEVICE), rgb, lab
 
@@ -282,17 +310,16 @@ def _rollout_v2(net, seed, skill, n_bots, max_steps=250):
             done = True
         ep["reward"].append(rw)
         prev = r = None
-        prev_rgb = rgb
-        prev = rgb.transpose(2, 0, 1)[None].astype(np.float32) / 255.0
+        prev = _down128(rgb.transpose(2, 0, 1)[None].astype(np.float32) / 255.0)
     ep["alive"] = bool(game.players[1].alive)
     return ep, game
 
 
 def _ep_tensors(ep):
     rgb = np.stack(ep["rgb"]).transpose(0, 3, 1, 2).astype(np.float32) / 255.0
+    rgb = rgb.reshape(len(rgb), 3, 128, 2, 128, 2).mean(axis=(3, 5))
     prev = np.concatenate([rgb[:1], rgb[:-1]])
-    diff = np.clip(rgb - prev, -1, 1) * 0.5 + 0.5
-    x = torch.tensor(np.concatenate([rgb, diff], 1), device=DEVICE)
+    x = torch.tensor(np.concatenate([rgb, prev], 1), device=DEVICE)
     nums = torch.tensor(np.stack(ep["nums"]), device=DEVICE)
     return (x, nums,
             torch.tensor(ep["kind"], device=DEVICE),
@@ -304,7 +331,7 @@ def _ep_tensors(ep):
 
 def stage_ppo_v2(rounds=8, ep_per_round=6, epochs=4, gamma=0.99, lam=0.95,
                  clip=0.2, lr=3e-5):
-    net = TeacherV2().to(DEVICE)
+    net = TeacherV3().to(DEVICE)
     if TEACH_PT.exists():
         net.load_state_dict(torch.load(TEACH_PT, map_location=DEVICE))
     if torch.cuda.is_available() and torch.cuda.device_count() > 1:
