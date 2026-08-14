@@ -500,6 +500,7 @@ def mode_worker_v2(hours):
     # worker drew the SAME map sequence (slot 0 = black_arena forever).
     # Reseed per process for real map variety.
     np.random.seed((os.getpid() * 2654435761 + int(time.time())) % 2**31)
+    api0, _tok0 = _hf_api()   # used by the flush-failure budget guard below
     t_end = time.time() + hours * 3600
     ep_per = int(os.environ.get("V2_EP", "4"))
     flush_s = float(os.environ.get("FLUSH_S", "1200"))
