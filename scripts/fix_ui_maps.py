@@ -45,14 +45,10 @@ def clean(slug: str, fn):
 
 
 def main():
-    # snapshot polluted masks first (templates for the detector)
-    for slug in ("caucasia", "world2"):
-        if not (BASE / f"ui_tpl_{slug}.npy").exists():
-            save_polluted_tpl(slug)
-
-    def caucasia_cut(w):
-        # left menu-text band (measured on render: strokes in x < ~8%)
-        w[:, : int(w.shape[1] * 0.10)] = -1
+    def left_cut(frac):
+        def fn(w):
+            w[:, : int(w.shape[1] * frac)] = -1
+        return fn
 
     def world2_ring(w):
         r = max(2, int(w.shape[0] * 0.02))
@@ -61,8 +57,10 @@ def main():
         w[:, :r] = -1
         w[:, -r:] = -1
 
-    clean("caucasia", caucasia_cut)
+    clean("caucasia", left_cut(0.10))
     clean("world2", world2_ring)
+    clean("world", left_cut(0.06))       # left menu-text sliver (2026-08-14)
+    clean("mountains", left_cut(0.06))   # same sliver signature
 
     # gate mare_nostrum out of the worker rotation
     meta_p = BASE / "maps_meta.json"

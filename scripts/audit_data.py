@@ -220,12 +220,13 @@ def _ui_templates():
         _UI_TPL = {}
         base = os.path.join(os.path.dirname(os.path.abspath(__file__)),
                             "..", "weights", "maps")
-        # black/white_arena + mare_nostrum stay polluted (gated out of play).
-        # caucasia/world2 were surgically cleaned; their WATER masks are
-        # ~identical to the polluted ones (only the text-stroke pixels differ)
-        # so the cleaned npz still fingerprints old polluted episodes.
-        for slug in ("black_arena", "white_arena", "mare_nostrum",
-                     "caucasia", "world2"):
+        # ONLY ruined lobby-screen maps here (gated out of play forever, so
+        # no over-filter risk): black/white_arena + mare_nostrum.
+        # Sliver maps (caucasia/world2/world/mountains) are surgically
+        # cleaned but STAY in rotation; template-flagging them would also
+        # flag their new clean episodes (water masks ~identical) and kill
+        # the map. Old sliver episodes keep ~1% cosmetic label noise.
+        for slug in ("black_arena", "white_arena", "mare_nostrum"):
             p = os.path.join(base, slug + ".npz")
             if not os.path.exists(p):
                 continue
