@@ -304,6 +304,8 @@ def mode_trainer(hours):
         best = {"ts": int(time.time()), "wr": wr, "rank": rank, "source": "v14-seed"}
         json.dump(best, open(BEST_JSON, "w"), indent=2)
         log(f"seeded best from v14 checkpoint: wr={wr:.2f} rank={rank:.2f}")
+    net = None   # created on first training iter, then kept in-memory
+    opt = None
     while time.time() < t_end:
         t_it = time.time()
         # heartbeat FIRST, before any heavy work (v6)
@@ -354,8 +356,12 @@ def mode_trainer(hours):
         if len(episodes) > cap:
             idx = np.random.choice(len(episodes), cap, replace=False)
             episodes = [episodes[i] for i in sorted(idx)]
-        net, _ = load_latest_net()
-        opt = T.make_optimizer(net)   # Muon+AdamW hybrid, NaN-watchdogged
+        if net is None:
+            # load ONCE; then train continuously in-memory. Reloading the last
+            # SAVED net every round (old code) discarded every round that
+            # didn't beat the publish gate -> amnesia treadmill, no progress.
+            net, _ = load_latest_net()
+            opt = T.make_optimizer(net)   # Muon+AdamW hybrid, NaN-watchdogged
         _hb("training", t_it, eps=len(episodes))
         log(f"[hb] training on {len(episodes)} episodes "
             f"({time.time()-t_it:.0f}s since iter start)")
@@ -387,6 +393,14 @@ def mode_trainer(hours):
         # v2 shards stay ON HF (teacher needs them); only local move to done
         for p in pending_v2:
             p.rename(DONE_V2 / p.name)
+    # shift-end safety: don't lose in-memory progress when the 9h kernel dies
+    if net is not None:
+        wr, rank = T.evaluate(net, seeds=int(os.environ.get("EVAL_SEEDS", "8")),
+                              silent=True)
+        if (wr > best["wr"] + 1e-9) or \
+           (abs(wr - best["wr"]) < 1e-9 and rank <= best["rank"] - 1.0):
+            ts = save_checkpoint(net, wr, rank)
+            log(f"shift-end save: wr={wr:.2f} rank={rank:.2f} ts={ts}")
     log("trainer hours exhausted — exiting")
 
 
