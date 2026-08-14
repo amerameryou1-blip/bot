@@ -207,11 +207,59 @@ if __name__ == "__main__":
     main()
 
 
+def _ui_templates():
+    """2026-08-14: lobby-screenshot maps that slipped the stat gate.
+    mare_nostrum's source png is a LOBBY SCREEN (menu text/panels baked in);
+    caucasia had a left menu sliver; world2 a page-border ring (both since
+    cleaned by scripts/fix_ui_maps.py — templates kept so OLD episodes on the
+    polluted masks still get flagged). Returns {slug: land_mask_256}."""
+    from PIL import Image
+    import os
+    global _UI_TPL
+    if _UI_TPL is None:
+        _UI_TPL = {}
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "..", "weights", "maps")
+        # black/white_arena + mare_nostrum stay polluted (gated out of play).
+        # caucasia/world2 were surgically cleaned; their WATER masks are
+        # ~identical to the polluted ones (only the text-stroke pixels differ)
+        # so the cleaned npz still fingerprints old polluted episodes.
+        for slug in ("black_arena", "white_arena", "mare_nostrum",
+                     "caucasia", "world2"):
+            p = os.path.join(base, slug + ".npz")
+            if not os.path.exists(p):
+                continue
+            w = np.load(p, allow_pickle=True)["world"].astype(np.int16)
+            water = (w < 0).astype(np.uint8) * 255
+            _UI_TPL[slug] = (np.array(Image.fromarray(water).resize(
+                (256, 256), Image.BILINEAR)) > 127)
+    return _UI_TPL
+
+
+_UI_TPL = None
+
+
+def _tpl_flags(lab_mid):
+    """True if the frame's WATER mask matches a polluted-UI map template.
+    Water never changes during an episode (players only eat land), so the
+    water mask is a stable per-map fingerprint — land masks drift as blobs
+    grow and both miss polluted eps and false-flag clean ones."""
+    wf = lab_mid == 0
+    for slug, wm in _ui_templates().items():
+        inter = (wf & wm).sum()
+        union = (wf | wm).sum()
+        if union > 0 and inter / union > 0.90:
+            return True
+    return False
+
+
 def arena_eps_of(lab, lens):
     """Per-episode True if that episode played on a lobby-screenshot map.
     Signatures measured on source maps: black_arena water .92 + land-thin .48
     (watermark text strokes); white_arena water .004; real watery maps
-    (island_kingdom) land-thin .12."""
+    (island_kingdom) land-thin .12.
+    2026-08-14: + template match for mare_nostrum/caucasia/world2 lobby-UI
+    pollution (found by eyeballing shard_v2_1786711002)."""
     rec = [max(1, int(l) // 2) for l in lens]
     out = []
     off = 0
@@ -227,7 +275,7 @@ def arena_eps_of(lab, lens):
             er = (core & lm[:-2, 1:-1] & lm[2:, 1:-1]
                   & lm[1:-1, :-2] & lm[1:-1, 2:])
             thin = 1 - er.sum() / max(lm.sum(), 1)
-            a = wm < 0.05 or (wm > 0.88 and thin > 0.35)
+            a = wm < 0.05 or (wm > 0.88 and thin > 0.35) or _tpl_flags(m)
         out.append(bool(a))
         off += n
     return out
