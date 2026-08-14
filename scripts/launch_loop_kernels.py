@@ -67,9 +67,9 @@ subprocess.run(["git", "clone", "--depth", "1", "@@REPO@@", "/kaggle/working/bot
 os.chdir("/kaggle/working/bot")
 os.environ["FORCE_CPU"] = "1"
 os.environ["TRAIN_EPOCHS"] = "1"   # lean iterations on CPU (measured 2026-08-09)
-# 2026-08-14: was 2 -> rank noise ±3 made the save-gate a coin flip.
-# 8 seeds ~ doubles eval time but decisions become trustworthy.
-os.environ["EVAL_SEEDS"] = "8"
+# 2026-08-14: was 2, then 8 -> observed rank swings ±3.5, gate margin was below
+# noise (lottery publishes). 16 seeds = trustworthy decisions, slower rounds.
+os.environ["EVAL_SEEDS"] = "16"
 os.environ["EP_CAP"] = "16"
 time.sleep(@@DELAY@@ * 60)
 subprocess.run([sys.executable, "scripts/rl_loop.py", "trainer",

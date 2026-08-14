@@ -50,27 +50,31 @@ def log(msg):
     print(f"[rl {time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+_LAST_HB_UP = 0.0
+
+
 def _hb(phase, t_it=None, **extra):
-    """v6 telemetry: heartbeat with PHASE per sub-step, 3 upload attempts
-    with backoff. If the trainer ever hangs, the LAST phase tells where."""
+    """v6 telemetry: heartbeat with PHASE per sub-step. Upload throttled to
+    once per 2 min (was every call -> ~22 commits/h eating the HF budget)."""
+    global _LAST_HB_UP
     payload = {"ts": int(time.time()), "phase": phase}
     if t_it is not None:
         payload["iter_s"] = int(time.time() - t_it)
     payload.update(extra)
-    for attempt in range(1):
-        try:
-            api_h, tok_h = _hf_api()
-            if not api_h:
-                return
-            hb = RL / "hb.json"
-            json.dump(payload, open(hb, "w"))
-            api_h.upload_file(path_or_fileobj=str(hb),
-                              path_in_repo="rl/trainer_heartbeat.json",
-                              repo_id=HF_DATASET, repo_type="dataset", token=tok_h)
+    if time.time() - _LAST_HB_UP < 120:
+        return
+    try:
+        api_h, tok_h = _hf_api()
+        if not api_h:
             return
-        except Exception:
-            time.sleep(15 * (attempt + 1))
-    log(f"[hb] phase={phase} upload failed 3x")
+        hb = RL / "hb.json"
+        json.dump(payload, open(hb, "w"))
+        api_h.upload_file(path_or_fileobj=str(hb),
+                          path_in_repo="rl/trainer_heartbeat.json",
+                          repo_id=HF_DATASET, repo_type="dataset", token=tok_h)
+        _LAST_HB_UP = time.time()
+    except Exception:
+        pass
 
 
 def _hf_api():
@@ -105,27 +109,56 @@ def _try_load(net, path):
         return False
 
 
+def _read_best_json(api, tok):
+    """best.json with validation + forced retry (a cached half-written copy
+    made a trainer restart from the wrong brain on 2026-08-14)."""
+    for force in (False, True):
+        try:
+            p = api.hf_hub_download(repo_id=HF_DATASET, repo_type="dataset",
+                                    filename="rl/best.json", token=tok,
+                                    force_download=force)
+            return json.load(open(p))
+        except Exception:
+            continue
+    return None
+
+
 def load_latest_net():
-    """Newest checkpoint: HF rl/best.json+ckpt -> local best.pt -> model.pt.
-    All loads are shape-safe (old 85k brains can never crash the 2M net)."""
+    """Newest checkpoint: HF rl/best.json+ckpt -> ckpt-list fallback ->
+    local best.pt -> model.pt. All loads shape-safe."""
+    net = T.make_net().to(T.DEVICE)
     api, tok = _hf_api()
     if api:
-        try:
-            remote = json.loads(api.hf_hub_download(
-                repo_id=HF_DATASET, repo_type="dataset",
-                filename="rl/best.json", token=tok))
-            local = best_meta()
-            if remote.get("ts", 0) > local.get("ts", 0):
+        remote = _read_best_json(api, tok)
+        if remote is not None:
+            try:
                 p = api.hf_hub_download(repo_id=HF_DATASET, repo_type="dataset",
-                                        filename=f"rl/ckpt_{remote['ts']}.pt", token=tok)
-                net = T.make_net().to(T.DEVICE)
+                                        filename=f"rl/ckpt_{remote['ts']}.pt",
+                                        token=tok)
                 if _try_load(net, p):
                     log(f"pulled newer checkpoint ts={remote['ts']} "
                         f"wr={remote.get('wr')}")
                     return net, remote
-        except Exception as e:
-            log(f"checkpoint pull skipped ({str(e)[:60]})")
-    net = T.make_net().to(T.DEVICE)
+            except Exception as e:
+                log(f"checkpoint pull skipped ({str(e)[:60]})")
+        else:
+            # best.json unreadable -> newest ckpt file on the hub by name
+            try:
+                cks = [f for f in api.list_repo_files(HF_DATASET,
+                       repo_type="dataset", token=tok)
+                       if f.startswith("rl/ckpt_")]
+                if cks:
+                    newest = max(cks, key=lambda f: int(f[:-3].split("_")[1]))
+                    p = api.hf_hub_download(repo_id=HF_DATASET,
+                                            repo_type="dataset",
+                                            filename=newest, token=tok)
+                    if _try_load(net, p):
+                        log(f"best.json unreadable — fell back to {newest}")
+                        return net, {"ts": int(newest[:-3].split("_")[1]),
+                                     "wr": 0.0, "rank": 9.5,
+                                     "source": "ckpt-fallback"}
+            except Exception as e:
+                log(f"ckpt fallback failed ({str(e)[:50]})")
     if BEST_PT.exists() and _try_load(net, BEST_PT):
         return net, best_meta()
     T.load_model(net)  # weights/nn/model.pt (shape-safe inside)
@@ -296,14 +329,22 @@ def mode_trainer(hours):
     ship_wr = float(os.environ.get("SHIP_WR", "0.30"))
     api, tok = _hf_api()
     best = best_meta()
-    # seed best wr from the loaded checkpoint if we have one
-    if best["wr"] < 0 and T.MODEL_PT.exists():
-        net = T.make_net().to(T.DEVICE)
-        T.load_model(net)
-        wr, rank = T.evaluate(net, seeds=6, silent=True)
-        best = {"ts": int(time.time()), "wr": wr, "rank": rank, "source": "v14-seed"}
-        json.dump(best, open(BEST_JSON, "w"), indent=2)
-        log(f"seeded best from v14 checkpoint: wr={wr:.2f} rank={rank:.2f}")
+    # seed best: hub best.json first (lineage!), v14 eval only if hub empty
+    if best["wr"] < 0:
+        api0, tok0 = _hf_api()
+        remote = _read_best_json(api0, tok0) if api0 else None
+        if remote and remote.get("wr", -1) >= 0:
+            best = remote
+            log(f"seeded best from HUB: wr={best['wr']:.2f} "
+                f"rank={best['rank']:.2f} ts={best['ts']}")
+        elif T.MODEL_PT.exists():
+            net0 = T.make_net().to(T.DEVICE)
+            T.load_model(net0)
+            wr, rank = T.evaluate(net0, seeds=6, silent=True)
+            best = {"ts": int(time.time()), "wr": wr, "rank": rank,
+                    "source": "v14-seed"}
+            json.dump(best, open(BEST_JSON, "w"), indent=2)
+            log(f"seeded best from v14 checkpoint: wr={wr:.2f} rank={rank:.2f}")
     net = None   # created on first training iter, then kept in-memory
     opt = None
     while time.time() < t_end:
@@ -378,8 +419,10 @@ def mode_trainer(hours):
         # ~5 min and burning the commit budget workers need. Now: save only on
         # a strict wr gain, or (at the wr=0 plateau) a rank jump >= 1.5, which
         # is beyond 4-seed eval noise.
+        # 2026-08-14b: observed 8-seed rank swings of ±3.5 -> margin was BELOW
+        # the noise (publishes could be lottery). Now 16-seed evals + margin 2.0.
         improved = (wr > best["wr"] + 1e-9) or \
-                   (abs(wr - best["wr"]) < 1e-9 and rank <= best["rank"] - 1.5)
+                   (abs(wr - best["wr"]) < 1e-9 and rank <= best["rank"] - 2.0)
         if improved:
             ts = save_checkpoint(net, wr, rank)
             best = {"ts": ts, "wr": wr, "rank": rank, "source": "trainer"}
@@ -398,7 +441,7 @@ def mode_trainer(hours):
         wr, rank = T.evaluate(net, seeds=int(os.environ.get("EVAL_SEEDS", "8")),
                               silent=True)
         if (wr > best["wr"] + 1e-9) or \
-           (abs(wr - best["wr"]) < 1e-9 and rank <= best["rank"] - 1.0):
+           (abs(wr - best["wr"]) < 1e-9 and rank <= best["rank"] - 1.5):
             ts = save_checkpoint(net, wr, rank)
             log(f"shift-end save: wr={wr:.2f} rank={rank:.2f} ts={ts}")
     log("trainer hours exhausted — exiting")
