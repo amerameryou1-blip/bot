@@ -32,6 +32,8 @@ ALIVE = ("RUNNING", "QUEUED")
 
 def status(owner, slug, tok):
     env = dict(os.environ)
+    # pip --user installs the kaggle CLI here; sandbox PATH misses it
+    env["PATH"] = env.get("PATH", "") + ":" + os.path.expanduser("~/.local/bin")
     if tok:
         env["KAGGLE_API_TOKEN"] = tok
     # 2026-08-14 fix: status_arg already returns ["kernels","status",slug] —
