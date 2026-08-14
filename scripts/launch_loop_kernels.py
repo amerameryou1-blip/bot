@@ -76,20 +76,21 @@ print("TRAINER_SESSION_DONE", flush=True)
 '''
 
 
-def push_kernel(slug: str, title: str, code: str, gpu: bool = False) -> str:
+def push_kernel(slug: str, title: str, code: str, gpu: bool = False,
+                owner: str = "amerameryou", token: str = "") -> str:
     d = tempfile.mkdtemp(prefix=f"kg-{slug}-")
     with open(os.path.join(d, "main.py"), "w") as f:
         f.write("import sys\n" + code)
     meta = {
-        "id": f"amerameryou/{slug}",
+        "id": f"{owner}/{slug}",
         "title": title,
         "code_file": "main.py",
         "language": "python",
         "kernel_type": "script",
         "is_private": True,
         # CPU-only fleet: GPU hours are reserved for final big pushes
-        # (user decision 2026-08-08). Platform caps concurrent CPU at 5,
-        # so the default fleet is 4 workers + 1 trainer.
+        # (user decision 2026-08-08). Platform caps concurrent CPU at 5
+        # PER ACCOUNT; second account added 2026-08-14 by user order.
         "enable_gpu": gpu,
         "enable_internet": True,
         "kernel_sources": [],
@@ -97,8 +98,11 @@ def push_kernel(slug: str, title: str, code: str, gpu: bool = False) -> str:
     }
     with open(os.path.join(d, "kernel-metadata.json"), "w") as f:
         json.dump(meta, f, indent=2)
+    env = dict(os.environ)
+    if token:
+        env["KAGGLE_API_TOKEN"] = token
     r = subprocess.run(["kaggle", "kernels", "push", "-p", d],
-                       capture_output=True, text=True)
+                       capture_output=True, text=True, env=env)
     out = (r.stdout + r.stderr).strip().replace("\n", " ")
     shutil.rmtree(d, ignore_errors=True)
     return out

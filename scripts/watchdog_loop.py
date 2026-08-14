@@ -1,89 +1,94 @@
 #!/usr/bin/env python3
-"""Watchdog for the continuous RL loop on Kaggle.
+"""Dual-account fleet watchdog (2026-08-14, user order).
 
-Prints status of rl-worker-1..5 + rl-trainer; re-pushes any kernel that is
-not RUNNING/QUEUED (Kaggle sessions cap at ~9-12h — the loop must resume).
+Account 1 (amerameryou): 4 workers + trainer (+w5 spare).
+Account 2 (amer38, user-created for extra CPU quota): same shape.
+Tokens come ONLY from env KG1 / KG2 — never stored in this file.
 
-Usage: KAGGLE_CONFIG_DIR=... python3 scripts/watchdog_loop.py [--relaunch]
+Every cycle: status both fleets, relaunch dead kernels, push trainers
+best-effort, pre-fetch unaudited HF shards for the agent's review.
 """
 import os
 import sys
 import subprocess
-import argparse
+import time
 
-# Kaggle slugifies kernel titles: "RL loop worker N" -> rl-loop-worker-N
-# fleet = 3 workers + CPU trainer + CPU v15 = exactly the 5-CPU cap
-# (Kaggle enforces it server-side; stay AT it, never over — user TOS check
-# 2026-08-08: CPU batch cap 5, GPU cap 2, separate pools)
-KERNELS = ([f"rl-v3-worker-{i}" for i in range(1, 5)]
-           + ["rl-loop-trainer-cpu", "rl-v3-worker-5"])
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import launch_loop_kernels as L
+
+FLEETS = [
+    {"owner": "amerameryou", "tok": os.environ.get("KG1", ""),
+     "workers": [f"rl-v3-worker-{i}" for i in range(1, 6)],
+     "trainer": "rl-loop-trainer-cpu"},
+    # account 2 = pure data (5 workers). ONE trainer total for the whole
+    # project — a second trainer would race on best.json for nothing.
+    # (rl-b-trainer v1 runs out its 9h once; we do NOT relaunch it.)
+    {"owner": "amer38", "tok": os.environ.get("KG2", ""),
+     "workers": [f"rl-b-worker-{i}" for i in range(1, 6)],
+     "trainer": ""},
+]
 ALIVE = ("RUNNING", "QUEUED")
 
 
-def status(slug: str) -> str:
-    r = subprocess.run(["kaggle", "kernels", "status", f"amerameryou/{slug}"],
-                       capture_output=True, text=True)
+def status(owner, slug, tok):
+    env = dict(os.environ)
+    if tok:
+        env["KAGGLE_API_TOKEN"] = tok
+    r = subprocess.run(["kaggle", "kernels", status_arg(owner, slug)],
+                       capture_output=True, text=True, env=env)
     out = (r.stdout + r.stderr)
-    for tok in ("COMPLETE", "ERROR", "CANCEL_ACKNOWLEDGED", "RUNNING", "QUEUED"):
-        if tok in out:
-            return tok
+    for t in ("COMPLETE", "ERROR", "CANCEL_ACKNOWLEDGED", "RUNNING", "QUEUED"):
+        if t in out:
+            return t
     return out.strip()[:60]
 
 
-def push_trainer_best_effort():
-    """Keep trying to push the newest trainer; rejected while 5 CPU sessions
-    run, goes through the instant a slot frees (v15 finish / worker end)."""
-    try:
-        import launch_loop_kernels as L
-        hf = os.environ.get("HF_TOKEN", "").strip()
-        if not hf:
-            return
-        code = (L.TRAINER_BOOT.replace("@@HF@@", hf).replace("@@REPO@@", L.GH_REPO_URL)
-                .replace("@@HOURS@@", "9.0").replace("@@DELAY@@", "1"))
-        out = L.push_kernel("rl-loop-trainer-cpu", "rl-loop-trainer-cpu", code)
-        print(f"trainer push: {out[:100]}", flush=True)
-    except Exception as e:
-        print(f"trainer push err: {e}", flush=True)
+def status_arg(owner, slug):
+    return ["kernels", "status", f"{owner}/{slug}"]
 
 
-def tidy_old_shards():
-    import os as _os
-    # quiet protocol: at most one tidy attempt per hour
-    if _os.path.exists("/tmp/last_tidy") and             _os.path.getmtime("/tmp/last_tidy") > __import__("time").time() - 3600:
-        return
-    open("/tmp/last_tidy", "w").write("x")
-    """Delete the 6 old root filler shards once HF's 128-commits/h budget
-    allows (idempotent; silently retries every watchdog cycle)."""
-    try:
-        from huggingface_hub import HfApi
-        tok = os.environ.get("HF_TOKEN", "").strip()
-        if not tok:
-            return
-        api = HfApi(token=tok)
-        fs = api.list_repo_files("amer224/territorial-bot-data", repo_type="dataset")
-        old = [f for f in fs if f.startswith("shard_") and f.endswith(".npz")]
-        for f in old:
-            api.delete_file(path_in_repo=f, repo_id="amer224/territorial-bot-data",
-                            repo_type="dataset", token=tok)
-        if old:
-            print(f"tidied {len(old)} old used shards", flush=True)
-    except Exception as e:
-        print(f"tidy skipped (budget?): {str(e)[:60]}", flush=True)
+def worker_code(hf):
+    return (L.HD_WORKER_BOOT.replace("@@HF@@", hf)
+            .replace("@@REPO@@", L.GH_REPO_URL)
+            .replace("@@HOURS@@", "8.5"))
+
+
+def trainer_code(hf):
+    return (L.TRAINER_BOOT.replace("@@HF@@", hf)
+            .replace("@@REPO@@", L.GH_REPO_URL)
+            .replace("@@HOURS@@", "9.0").replace("@@DELAY@@", "0"))
 
 
 def main():
+    import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--relaunch", action="store_true",
-                    help="re-push kernels that finished/died")
+    ap.add_argument("--relaunch", action="store_true")
     a = ap.parse_args()
-    dead = []
-    for k in KERNELS:
-        s = status(k)
-        print(f"{k:14s} {s}", flush=True)
-        if not any(x in s for x in ALIVE):
-            dead.append(k)
-    push_trainer_best_effort()
-    tidy_old_shards()
+    hf = os.environ.get("HF_TOKEN", "").strip()
+
+    for fl in FLEETS:
+        if not fl["tok"]:
+            print(f"{fl['owner']}: no token in env — skip", flush=True)
+            continue
+        # fleet order: 4 workers + trainer get slots; w5 is the spare
+        tr = [fl["trainer"]] if fl["trainer"] else []
+        order = fl["workers"][:4] + tr + fl["workers"][4:]
+        dead = []
+        for k in order:
+            s = status(fl["owner"], k, fl["tok"])
+            print(f"{fl['owner']}/{k:22s} {s}", flush=True)
+            if not any(x in s for x in ALIVE):
+                dead.append(k)
+        if a.relaunch and dead and hf:
+            for k in dead:
+                if k == fl["trainer"]:
+                    code = trainer_code(hf)
+                else:
+                    code = worker_code(hf)
+                out = L.push_kernel(k, k, code, owner=fl["owner"],
+                                    token=fl["tok"])
+                print(f"relaunched {fl['owner']}/{k}: {out[:120]}", flush=True)
+
     # pre-fetch unaudited HF shards for the agent's morning review
     try:
         subprocess.run([sys.executable,
@@ -91,42 +96,7 @@ def main():
                                      "review_v2.py"), "--fetch"], timeout=900)
     except Exception as e:
         print(f"review fetch skipped: {e}", flush=True)
-    if a.relaunch and dead:
-        # a CPU slot just freed -> ferry any recordings zips waiting on GH
-        try:
-            subprocess.run([sys.executable,
-                            os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                                         "push_migrate.py")], timeout=2400)
-        except Exception as e:
-            print(f"migrate hop failed: {e}")
-        import launch_loop_kernels as L
-        hf = os.environ.get("HF_TOKEN", "").strip()
-        for k in dead:
-            # v1 pool is SATURATED (20GB) — retired 2026-08-09 by user decision;
-            # its slots now belong to v2 producers. Status still monitored.
-            if k.startswith("rl-loop-worker-"):
-                print(f"{k}: dead, NOT relaunching (v1 retired)", flush=True)
-                continue
-            if k == "rl-loop-trainer-cpu":
-                code = (L.TRAINER_BOOT.replace("@@HF@@", hf)
-                        .replace("@@REPO@@", L.GH_REPO_URL)
-                        .replace("@@HOURS@@", "9.0").replace("@@DELAY@@", "0"))
-            elif k.startswith("rl-v3-worker"):
-                code = (L.HD_WORKER_BOOT.replace("@@HF@@", hf)
-                        .replace("@@REPO@@", L.GH_REPO_URL)
-                        .replace("@@HOURS@@", "8.5"))
-            elif k.startswith("rl-v2-worker"):
-                code = (L.V2_WORKER_BOOT.replace("@@HF@@", hf)
-                        .replace("@@REPO@@", L.GH_REPO_URL)
-                        .replace("@@HOURS@@", "8.5"))
-            else:
-                code = (L.WORKER_BOOT.replace("@@HF@@", hf)
-                        .replace("@@REPO@@", L.GH_REPO_URL)
-                        .replace("@@HOURS@@", "8.5"))
-            out = L.push_kernel(k, k, code)
-            print(f"relaunched {k}: {out[:140]}", flush=True)
 
 
 if __name__ == "__main__":
-    sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
     main()
