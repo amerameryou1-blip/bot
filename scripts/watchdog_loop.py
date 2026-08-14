@@ -34,7 +34,9 @@ def status(owner, slug, tok):
     env = dict(os.environ)
     if tok:
         env["KAGGLE_API_TOKEN"] = tok
-    r = subprocess.run(["kaggle", "kernels", status_arg(owner, slug)],
+    # 2026-08-14 fix: status_arg already returns ["kernels","status",slug] —
+    # wrapping it again made a nested list -> TypeError crash.
+    r = subprocess.run(["kaggle"] + status_arg(owner, slug),
                        capture_output=True, text=True, env=env)
     out = (r.stdout + r.stderr)
     for t in ("COMPLETE", "ERROR", "CANCEL_ACKNOWLEDGED", "RUNNING", "QUEUED"):

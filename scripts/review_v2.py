@@ -62,7 +62,7 @@ def main():
         REVIEW_DIR.mkdir(parents=True, exist_ok=True)
         EYE_DIR.mkdir(parents=True, exist_ok=True)
         plist = plist_early
-        for f in pending[:100]:  # per-pass cap keeps up with ~0.7 GB/h fleet
+        for f in pending[:200]:  # per-pass cap keeps up with the fleet
             name = Path(f).name
             p = hf_hub_download(HF_DATASET, f, repo_type="dataset", token=tok)
             dst = REVIEW_DIR / name
@@ -133,9 +133,9 @@ def main():
                   f"{clean_frac*100:.0f}% clean eps)")
             dst.unlink()  # keep /tmp small; ledger+plist are the record
         json.dump(plist, open(PENDING, "w"), indent=1)
-        # keep only newest 16 eyeball PNGs so /tmp stays small
+        # keep only newest 24 eyeball PNGs so /tmp stays small
         pngs = sorted(EYE_DIR.glob("*.png"), key=lambda p: p.stat().st_mtime)
-        for p in pngs[:-16]:
+        for p in pngs[:-24]:
             p.unlink()
         return
 
