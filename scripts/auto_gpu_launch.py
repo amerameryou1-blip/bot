@@ -61,8 +61,13 @@ def main():
         n_gh = v2_count_gh()
         print(f"[autopilot] GH shards {n_gh}", flush=True)
         # user rule (2026-08-10): NO GPU unless >=15GB AND agent reviewed data
+        # 2026-08-14: SOVEREIGN (290M rival brain + pipeline plumbing) is the
+        # gate brain now; env GATE_BRAIN=v3 falls back to TeacherV3.
         if gb >= 15.0 and os.path.exists(REVIEW):
-            r = subprocess.run([sys.executable, "scripts/launch_v2_gpu.py"],
+            launcher = ("scripts/launch_v2_gpu.py"
+                        if os.environ.get("GATE_BRAIN") == "v3"
+                        else "scripts/launch_sovereign_gpu.py")
+            r = subprocess.run([sys.executable, launcher],
                                capture_output=True, text=True)
             print(r.stdout[-500:], r.stderr[-300:], flush=True)
             open(MARK, "w").write(str(time.time()))
