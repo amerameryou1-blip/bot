@@ -89,6 +89,28 @@ def main():
                                     token=fl["tok"])
                 print(f"relaunched {fl['owner']}/{k}: {out[:120]}", flush=True)
 
+    # rival-brain upload detector (2026-08-14): the other agent will drop his
+    # model under brains/ — flag it loudly the moment it appears.
+    try:
+        from huggingface_hub import HfApi
+        hf = os.environ.get("HF_TOKEN", "").strip()
+        if hf:
+            fs = [f for f in HfApi(token=hf).list_repo_files(
+                "amer224/territorial-bot-data", repo_type="dataset", token=hf)
+                if f.startswith("brains/")]
+            prev = -1
+            try:
+                prev = int(open("/tmp/rival_brains_count").read())
+            except Exception:
+                pass
+            if len(fs) != prev:
+                print(f"RIVAL BRAINS/: {len(fs)} files "
+                      f"({'NEW UPLOAD' if len(fs) > max(prev,0) else 'changed'}) "
+                      f"-> review them!", flush=True)
+            open("/tmp/rival_brains_count", "w").write(str(len(fs)))
+    except Exception as e:
+        print(f"rival check skipped: {e}", flush=True)
+
     # pre-fetch unaudited HF shards for the agent's morning review
     try:
         subprocess.run([sys.executable,
