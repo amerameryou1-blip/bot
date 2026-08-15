@@ -64,7 +64,18 @@ def main():
         plist = plist_early
         for f in pending[:200]:  # per-pass cap keeps up with the fleet
             name = Path(f).name
-            p = hf_hub_download(HF_DATASET, f, repo_type="dataset", token=tok)
+            # 2026-08-15: HF streams occasionally EOF mid-download; retry 3x
+            p = None
+            for _try in range(3):
+                try:
+                    p = hf_hub_download(HF_DATASET, f, repo_type="dataset",
+                                        token=tok)
+                    break
+                except Exception as e:
+                    print(f"DL-RETRY {name}: {str(e)[:60]}", flush=True)
+                    time.sleep(5)
+            if p is None:
+                continue
             dst = REVIEW_DIR / name
             shutil.copy(p, dst)
             probs = audit_v2_shard(dst)
