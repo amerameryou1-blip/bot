@@ -33,6 +33,25 @@ def v2_count_gh():
 
 
 def v2_gb():
+    # 2026-08-15 fix: raw tree API is NOT paginated -> first page only
+    # (~1000 files = 7.7GB) and the gate could never see >=15GB. Use the
+    # paginated hub client.
+    try:
+        from huggingface_hub import HfApi
+        api = HfApi(token=T or None)
+        tot = 0
+        for p in ("rl/shards_v2", "rl/shards"):
+            try:
+                for f in api.list_repo_tree(
+                        "amer224/territorial-bot-data", path_in_repo=p,
+                        repo_type="dataset", token=T or None):
+                    if getattr(f, "size", 0):
+                        tot += f.size
+            except Exception:
+                pass
+        return tot / 1e9
+    except Exception:
+        pass
     tot = 0
     for p in ("rl/shards_v2", "rl/shards"):
         req = urllib.request.Request(
