@@ -420,7 +420,10 @@ def main():
                                ("kind_nll", "cell_nll", "pct_nll")}
                     running.update(wm_t)
                     if step % 25 == 0:
+                        mem = (torch.cuda.max_memory_allocated() / 1e9
+                               if dev.type == "cuda" else 0.0)
                         print(f"[sov] step={step} total={float(total):.3f} "
+                              f"gpu_peak={mem:.1f}GB "
                               f"kind={running.get('kind_nll', 0):.3f} "
                               f"cell={running.get('cell_nll', 0):.3f} "
                               f"wm_z={running.get('wm_z', 0):.4f}", flush=True)

@@ -39,7 +39,7 @@ sys.stdout = _Tee(LOGF)
 # v3: child subprocess output goes to the SAME log (v2 lost the traceback)
 RUN = lambda *a, **k: subprocess.run(*a, stdout=LOGF,
                                      stderr=subprocess.STDOUT, **k)
-print("sovereign-gpu boot v3", flush=True)
+print("sovereign-gpu boot v5", flush=True)
 
 def _up_log():
     try:
@@ -92,7 +92,7 @@ try:
     print("mini smoke rc=", r.returncode, flush=True)
     # ---- CUDA dry-run: 2 real steps so any GPU crash lands in the log ---
     r = RUN([sys.executable, "scripts/train_sovereign.py",
-             "--device", "cuda", "--amp", "--bs", "16", "--grad-ckpt",
+             "--device", "cuda", "--amp", "--bs", "8", "--grad-ckpt",
              "--data-dir", SH, "--steps", "2", "--eval-seeds", "1",
              "--eval-every", "999999", "--max-minutes", "10"])
     print("cuda dry-run rc=", r.returncode, flush=True)
@@ -101,7 +101,7 @@ try:
         raise SystemExit(1)
     # ---- real Stage-A pretrain -------------------------------------------
     r = RUN([sys.executable, "scripts/train_sovereign.py",
-             "--device", "cuda", "--amp", "--bs", "16",
+             "--device", "cuda", "--amp", "--bs", "8",
              "--data-dir", SH,
              "--epochs", "@@EPOCHS@@", "--eval-every", "800",
              "--eval-seeds", "16", "--grad-ckpt"])
