@@ -116,19 +116,31 @@ def get_shard_paths(args) -> list:
 # world-model loss (train_notes.md A.3, MuZero-lite)
 # --------------------------------------------------------------------------
 
-def world_model_loss(model, batch, policy_out, device):
+def _f32(o):
+    # 2026-08-15: losses run OUTSIDE autocast in fp32 (BCE is autocast-unsafe)
+    if isinstance(o, tuple):
+        return tuple(_f32(x) for x in o)
+    if torch.is_tensor(o):
+        return o.float()
+    return o
+
+
+def world_model_loss(model, batch, policy_out, device, amp_on=False):
     rgb = batch["rgb"].to(device)
     nums = batch["nums"].to(device)
     rtg = batch["rtg"].to(device).view(-1)
-    z = model.encode(rgb, nums, rtg=rtg)
-    prior, v_hat, w_hat = model.prediction(z)
-    z_next_hat, r_hat = model.dynamics(
-        z, batch["kind"].to(device), batch["cell"].to(device),
-        batch["pct"].to(device))
-    with torch.no_grad():
-        z_next = model.encode(batch["rgb_next"].to(device),
-                              batch["nums"].to(device),
-                              rtg=batch["rtg_next"].to(device).view(-1))
+    with torch.autocast("cuda", enabled=amp_on):
+        z = model.encode(rgb, nums, rtg=rtg)
+        prior, v_hat, w_hat = model.prediction(z)
+        z_next_hat, r_hat = model.dynamics(
+            z, batch["kind"].to(device), batch["cell"].to(device),
+            batch["pct"].to(device))
+        with torch.no_grad():
+            z_next = model.encode(batch["rgb_next"].to(device),
+                                  batch["nums"].to(device),
+                                  rtg=batch["rtg_next"].to(device).view(-1))
+    z, prior, v_hat, w_hat = _f32((z, prior, v_hat, w_hat))
+    z_next_hat, r_hat, z_next = _f32((z_next_hat, r_hat, z_next))
     l_z = F.mse_loss(z_next_hat, z_next)
     l_r = F.huber_loss(r_hat, batch["reward"].to(device))
     joint = policy_out["cell_logits"].detach().flatten(1)   # (B, 3*g*g)
@@ -375,23 +387,28 @@ def main():
                     nums = batch["nums"].to(dev)
                     rtg = batch["rtg"].to(dev).view(-1)
                     cell = batch["cell"].to(dev)
-                    with torch.autocast("cuda", enabled=args.amp and dev.type == "cuda"):
+                    # 2026-08-15: forward under autocast, losses in fp32
+                    # (F.binary_cross_entropy is autocast-unsafe -> v2 crash)
+                    amp_on = args.amp and dev.type == "cuda"
+                    with torch.autocast("cuda", enabled=amp_on):
                         out = model(rgb, nums, rtg=rtg, cell=cell,
                                     return_all=True)
-                        loss, terms = stage_a_loss(
-                            out, batch["kind"].to(dev), cell,
-                            batch["pct"].to(dev), ret=batch["ret"].to(dev),
-                            win_lab=batch["win_lab"].to(dev),
-                            lab64=batch["lab64"].to(dev),
-                            lab64_next=batch["lab64_next"].to(dev),
-                            gate_mask=batch["gate_mask"].to(dev),
-                            gate_valid=batch["gate_valid"].to(dev),
-                            threat=batch["threat"].to(dev),
-                            expand=batch["expand"].to(dev),
-                            nums_next=batch["nums_next"].to(dev),
-                            w=batch["w"].to(dev))
-                        wm, wm_t = world_model_loss(model, batch, out, dev)
-                        total = loss + wm
+                    out = {k: _f32(v) for k, v in out.items()}
+                    loss, terms = stage_a_loss(
+                        out, batch["kind"].to(dev), cell,
+                        batch["pct"].to(dev), ret=batch["ret"].to(dev),
+                        win_lab=batch["win_lab"].to(dev),
+                        lab64=batch["lab64"].to(dev),
+                        lab64_next=batch["lab64_next"].to(dev),
+                        gate_mask=batch["gate_mask"].to(dev),
+                        gate_valid=batch["gate_valid"].to(dev),
+                        threat=batch["threat"].to(dev),
+                        expand=batch["expand"].to(dev),
+                        nums_next=batch["nums_next"].to(dev),
+                        w=batch["w"].to(dev))
+                    wm, wm_t = world_model_loss(model, batch, out, dev,
+                                                amp_on)
+                    total = loss + wm
                     opt.zero_grad(set_to_none=True)
                     scaler.scale(total).backward()
                     scaler.unscale_(opt)
