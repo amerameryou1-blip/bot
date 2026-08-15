@@ -4,7 +4,9 @@ supervised Stage-A pretrain on Kaggle T4x2 — ONLY after the gate:
   HF rl/shards_v2 >= 15.0 GB  AND  /tmp/review_ok exists.
 
 2026-08-14: user decision — SOVEREIGN replaces TeacherV3 as the GPU brain.
-launch_v2_gpu.py stays as fallback (env GATE_BRAIN=v3 in auto_gpu_launch).
+2026-08-15: boot now tees ALL stdout to /tmp/sovboot.log and uploads it to
+  rl/sovereign_boot.log in try/finally — Kaggle stdout is invisible to us,
+  and v1 of this kernel exited silently in 35 min with no heartbeat.
 
 Usage: HF_TOKEN=... GH_TOKEN=... python3 scripts/launch_sovereign_gpu.py
 GPU use = training only (user rule). One kernel, one purpose.
@@ -16,49 +18,83 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from launch_loop_kernels import push_kernel  # noqa: E402
 
 SOV_TRAIN_BOOT = '''import os, subprocess, sys, time, glob, shutil
+
+class _Tee:
+    def __init__(self, path):
+        self._f = open(path, "w", buffering=1)
+        self._s = sys.__stdout__
+    def write(self, t):
+        try: self._f.write(t)
+        except Exception: pass
+        self._s.write(t)
+    def flush(self):
+        try: self._f.flush()
+        except Exception: pass
+        self._s.flush()
+
 os.environ.setdefault("HF_TOKEN", "@@HF@@")
-print("sovereign-gpu boot", flush=True)
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "torch==2.4.1",
-                "--index-url", "https://download.pytorch.org/whl/cu121"],
-               check=False)
-subprocess.run([sys.executable, "-c",
-                "import torch; a=torch.randn(16,16,device='cuda');"
-                "(a@a).sum().item(); torch.cuda.synchronize();"
-                "print('CUDA_OK gpus=', torch.cuda.device_count())"],
-               check=False)
-subprocess.run([sys.executable, "-m", "pip", "install", "-q", "numpy",
-                "huggingface_hub", "pillow"], check=False)
-subprocess.run(["git", "clone", "--depth", "1", "@@REPO_URL@@",
-                "/kaggle/working/bot"], check=True)
-os.chdir("/kaggle/working/bot")
-# ---- data: pull the FULL reviewed pool from HF --------------------------
-os.makedirs("weights/nn/rl/sov_shards", exist_ok=True)
+sys.stdout = _Tee("/tmp/sovboot.log")
+print("sovereign-gpu boot v2", flush=True)
+
+def _up_log():
+    try:
+        from huggingface_hub import upload_file
+        upload_file(path_or_fileobj="/tmp/sovboot.log",
+                    path_in_repo="rl/sovereign_boot.log",
+                    repo_id="amer224/territorial-bot-data",
+                    repo_type="dataset", token=os.environ["HF_TOKEN"])
+        print("boot log uploaded", flush=True)
+    except Exception as e:
+        print("log upload fail:", str(e)[:120], flush=True)
+
 try:
-    from huggingface_hub import snapshot_download
-    p2 = snapshot_download("amer224/territorial-bot-data",
-                           repo_type="dataset",
-                           allow_patterns=["rl/shards_v2/*"],
-                           token=os.environ["HF_TOKEN"])
-    for f in glob.glob(p2 + "/rl/shards_v2/*.npz"):
-        shutil.copy(f, "weights/nn/rl/sov_shards/")
-    print("shards from HF:", len(glob.glob("weights/nn/rl/sov_shards/*.npz")))
-except Exception as e:
-    print("HF pull failed:", str(e)[:150])
-# ---- GPU sanity smoke first (mini config, 3 steps, cheap) ---------------
-r = subprocess.run([sys.executable, "scripts/train_sovereign.py", "--mini",
-                    "--data-dir", "weights/nn/rl/sov_shards",
-                    "--steps", "3", "--bs", "2", "--eval-seeds", "1",
-                    "--eval-every", "100000", "--max-minutes", "20",
-                    "--no-hf"])
-print("mini smoke rc=", r.returncode, flush=True)
-# ---- real Stage-A pretrain ----------------------------------------------
-r = subprocess.run([sys.executable, "scripts/train_sovereign.py",
-                    "--device", "cuda", "--amp", "--bs", "16",
-                    "--data-dir", "weights/nn/rl/sov_shards",
-                    "--epochs", "@@EPOCHS@@", "--eval-every", "800",
-                    "--eval-seeds", "16", "--grad-ckpt"])
-print("sovereign stage-A rc=", r.returncode, flush=True)
-print("SOVEREIGN_GPU_DONE", flush=True)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q",
+                    "torch==2.4.1",
+                    "--index-url", "https://download.pytorch.org/whl/cu121"],
+                   check=False)
+    subprocess.run([sys.executable, "-c",
+                    "import torch; a=torch.randn(16,16,device='cuda');"
+                    "(a@a).sum().item(); torch.cuda.synchronize();"
+                    "print('CUDA_OK gpus=', torch.cuda.device_count())"],
+                   check=False)
+    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "numpy",
+                    "huggingface_hub", "pillow"], check=False)
+    subprocess.run(["git", "clone", "--depth", "1", "@@REPO_URL@@",
+                    "/kaggle/working/bot"], check=True)
+    os.chdir("/kaggle/working/bot")
+    # ---- data: ONE real-file download into the 20GB working disk --------
+    # v1 died here: default cache lives on the small home disk and the
+    # extra copy doubled the 17GB footprint. Symlinks off, no copy.
+    os.environ["SOV_TMP"] = "/kaggle/working"
+    SH = "/kaggle/working/shards/rl/shards_v2"
+    try:
+        from huggingface_hub import snapshot_download
+        snapshot_download("amer224/territorial-bot-data",
+                          repo_type="dataset",
+                          allow_patterns=["rl/shards_v2/*"],
+                          local_dir="/kaggle/working/shards",
+                          local_dir_use_symlinks=False,
+                          token=os.environ["HF_TOKEN"])
+        print("shards from HF:", len(glob.glob(SH + "/*.npz")), flush=True)
+    except Exception as e:
+        print("HF pull failed:", str(e)[:150], flush=True)
+    # ---- GPU sanity smoke first (mini config, 3 steps, cheap) -----------
+    r = subprocess.run([sys.executable, "scripts/train_sovereign.py", "--mini",
+                        "--data-dir", SH,
+                        "--steps", "3", "--bs", "2", "--eval-seeds", "1",
+                        "--eval-every", "100000", "--max-minutes", "20",
+                        "--no-hf"])
+    print("mini smoke rc=", r.returncode, flush=True)
+    # ---- real Stage-A pretrain -------------------------------------------
+    r = subprocess.run([sys.executable, "scripts/train_sovereign.py",
+                        "--device", "cuda", "--amp", "--bs", "16",
+                        "--data-dir", SH,
+                        "--epochs", "@@EPOCHS@@", "--eval-every", "800",
+                        "--eval-seeds", "16", "--grad-ckpt"])
+    print("sovereign stage-A rc=", r.returncode, flush=True)
+    print("SOVEREIGN_GPU_DONE", flush=True)
+finally:
+    _up_log()
 '''
 
 

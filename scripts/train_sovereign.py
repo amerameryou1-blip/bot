@@ -51,6 +51,8 @@ from sovereign_data import ShardPrepper, StageADataset  # noqa: E402
 from torch.utils.data import DataLoader, WeightedRandomSampler  # noqa: E402
 
 HF_REPO = "amer224/territorial-bot-data"
+# Kaggle's /tmp may be small; kernel sets SOV_TMP=/kaggle/working
+TMP = Path(os.environ.get("SOV_TMP", "/tmp"))
 SOV_DIR = "rl/sovereign"
 
 WM_LAMB = dict(z=0.5, r=0.1, prior=0.3, v=0.1, w=0.1)
@@ -220,7 +222,7 @@ def load_best() -> dict:
         from huggingface_hub import hf_hub_download
         p = hf_hub_download(HF_REPO, f"{SOV_DIR}/best.json",
                             repo_type="dataset", token=_hf_token() or None,
-                            local_dir="/tmp/sov_best")
+                            local_dir=str(TMP / "best"))
         d = json.load(open(p))
         if isinstance(d.get("rank"), (int, float)):
             return {"ts": int(d.get("ts", 0)), "wr": float(d.get("wr", 0)),
@@ -239,7 +241,7 @@ def hf_upload(local: Path, remote: str):
 
 def heartbeat(**kw):
     kw["ts"] = time.time()
-    p = Path("/tmp/sov_heartbeat.json")
+    p = TMP / "sov_heartbeat.json"
     json.dump(kw, open(p, "w"))
     if _hf_token() and not kw.get("no_hf"):
         try:
@@ -260,7 +262,7 @@ def main():
     ap.add_argument("--data-dir", default=None)
     ap.add_argument("--fetch", type=int, default=0,
                     help="pull N newest shards from HF")
-    ap.add_argument("--dl-dir", default="/tmp/sov_shards")
+    ap.add_argument("--dl-dir", default=str(__import__("os").environ.get("SOV_TMP", "/tmp") + "/sov_shards"))
     ap.add_argument("--epochs", type=int, default=2)
     ap.add_argument("--steps", type=int, default=0,
                     help="cap optimizer steps (0 = no cap)")
@@ -326,13 +328,13 @@ def main():
                    (abs(wr - best["wr"]) < 1e-9 and rank <= best["rank"] - 2.0)
         if improved:
             ts = int(time.time())
-            ck = Path(f"/tmp/sov_ckpt_{ts}.pt")
+            ck = TMP / f"sov_ckpt_{ts}.pt"
             torch.save(model.state_dict(), ck)
             best = {"ts": ts, "wr": wr, "rank": rank, "source": "sovereign"}
             if not args.no_hf and _hf_token():
                 try:
                     hf_upload(ck, f"{SOV_DIR}/ckpt_{ts}.pt")
-                    bp = Path("/tmp/sov_best.json"); json.dump(best, open(bp, "w"))
+                    bp = TMP / "sov_best.json"; json.dump(best, open(bp, "w"))
                     hf_upload(bp, f"{SOV_DIR}/best.json")
                     print(f"[sov] NEW BEST uploaded ts={ts}", flush=True)
                 except Exception as e:
@@ -419,7 +421,7 @@ def main():
     wr, rank = evaluate_sovereign(model, seeds=max(args.eval_seeds, 1))
     print(f"[sov] END-EVAL: wr={wr:.2f} rank={rank:.2f} steps={step}",
           flush=True)
-    ck = Path("/tmp/sov_final.pt")
+    ck = TMP / "sov_final.pt"
     torch.save(model.state_dict(), ck)
     if not args.no_hf and _hf_token():
         try:
