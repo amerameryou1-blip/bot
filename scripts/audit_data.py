@@ -240,6 +240,63 @@ def _ui_templates():
 _UI_TPL = None
 
 
+_GOOD_TPL = None
+
+
+def _good_templates():
+    """2026-08-15: water masks of the 21 maps the agent rendered and
+    eyeballed as CLEAN gameplay (every pass's samples). Used to let the
+    unattended daemon auto-commit ONLY shards whose episodes all
+    fingerprint-match a reviewed map (IoU>0.90) with perfect stats."""
+    global _GOOD_TPL
+    if _GOOD_TPL is None:
+        import os
+        from PIL import Image
+        _GOOD_TPL = {}
+        base = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                            "..", "weights", "maps")
+        try:
+            meta = json.load(open(os.path.join(base, "maps_meta.json")))
+        except Exception:
+            return _GOOD_TPL
+        for slug, v in meta.items():
+            if not v.get("pass"):
+                continue
+            p = os.path.join(base, slug + ".npz")
+            if not os.path.exists(p):
+                continue
+            w = np.load(p, allow_pickle=True)["world"].astype(np.int16)
+            water = (w < 0).astype(np.uint8) * 255
+            _GOOD_TPL[slug] = (np.array(Image.fromarray(water).resize(
+                (256, 256), Image.BILINEAR)) > 127)
+    return _GOOD_TPL
+
+
+def good_map_eps_of(lab, lens):
+    """Per-episode True if the episode's water mask matches a reviewed
+    CLEAN map (IoU > 0.90). Water is invariant mid-episode, so this is a
+    stable fingerprint."""
+    rec = [max(1, int(l) // 2) for l in lens]
+    out = []
+    off = 0
+    tpls = _good_templates()
+    for e in range(len(lens)):
+        n = rec[e]
+        mid = off + n // 2
+        ok = False
+        if mid < lab.shape[0] and tpls:
+            wf = lab[mid] == 0
+            for wm in tpls.values():
+                inter = (wf & wm).sum()
+                union = (wf | wm).sum()
+                if union > 0 and inter / union > 0.90:
+                    ok = True
+                    break
+        out.append(bool(ok))
+        off += n
+    return out
+
+
 def _tpl_flags(lab_mid):
     """True if the frame's WATER mask matches a polluted-UI map template.
     Water never changes during an episode (players only eat land), so the

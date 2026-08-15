@@ -18,7 +18,7 @@ import numpy as np
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from audit_data import audit_v2_shard  # noqa: E402
+from audit_data import audit_v2_shard, good_map_eps_of  # noqa: E402
 
 REPO = Path(__file__).resolve().parents[1]
 LEDGER = REPO / "weights/nn/rl/reviewed_ledger.json"
@@ -39,6 +39,8 @@ def main():
                     help="download+audit unreviewed HF shards, dump frames")
     ap.add_argument("--commit", action="store_true",
                     help="add audited /tmp/review shards to ledger")
+    ap.add_argument("--auto", action="store_true",
+                    help="with --commit: only commit map_ok shards (daemon)")
     a = ap.parse_args()
 
     tok = os.environ.get("HF_TOKEN", "").strip()
@@ -137,9 +139,14 @@ def main():
             if flags:
                 print(f"FLAG {name}: {flags}")
             clean_frac = round(len(good) / len(ae), 3)
+            # 2026-08-15: unattended auto-commit safety — every GOOD episode
+            # must fingerprint-match a map the agent rendered+eyeballed.
+            gm = good_map_eps_of(lab, lens)
+            map_ok = bool(all(gm[e] for e in good)) if good else False
             plist[name] = {"gb": dst.stat().st_size / 1e9,
                            "status": "CLEAN", "stats": stats, "sane": sane,
-                           "flags": flags, "clean_frac": clean_frac}
+                           "flags": flags, "clean_frac": clean_frac,
+                           "map_ok": map_ok}
             print(f"AUDIT-CLEAN {name} ({dst.stat().st_size/1e6:.1f} MB, "
                   f"{clean_frac*100:.0f}% clean eps)")
             dst.unlink()  # keep /tmp small; ledger+plist are the record
@@ -164,6 +171,8 @@ def main():
             if rec.get("flags"):
                 print(f"skip {name}: needs agent eyes {rec['flags']}")
                 continue
+            if a.auto and not rec.get("map_ok"):
+                continue  # daemon may only auto-commit fingerprint-clean shards
             cg = rec["gb"] * rec.get("clean_frac", 1.0)
             ledger["files"][name] = {"gb": round(cg, 4),
                                      "ts": int(time.time()),
