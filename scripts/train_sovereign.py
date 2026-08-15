@@ -253,11 +253,14 @@ def hf_upload(local: Path, remote: str):
 
 def heartbeat(**kw):
     kw["ts"] = time.time()
-    p = TMP / "sov_heartbeat.json"
+    # 2026-08-15: two redundant GPU kernels raced on ONE heartbeat path and
+    # the HF copy read back EMPTY. Per-kernel filename kills the race.
+    slug = os.environ.get("KAGGLE_KERNEL_SLUG", "local")
+    p = TMP / f"sov_heartbeat_{slug}.json"
     json.dump(kw, open(p, "w"))
     if _hf_token() and not kw.get("no_hf"):
         try:
-            hf_upload(p, "rl/sovereign_heartbeat.json")
+            hf_upload(p, f"rl/sovereign_heartbeat_{slug}.json")
         except Exception as e:
             print("[warn] hb upload:", str(e)[:80], flush=True)
 
