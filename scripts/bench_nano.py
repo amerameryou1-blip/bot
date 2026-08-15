@@ -22,7 +22,11 @@ All runs are at map_size=256 (the real contract size) by default; use
 from __future__ import annotations
 
 import argparse
+import sys
 import time
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 import torch
 
@@ -45,12 +49,12 @@ def timeit(fn, iters: int, warmup: int, device: torch.device) -> float:
 def run_one(cfg, device, args, label: str) -> None:
     net = make_nano(cfg, seed=0).eval().to(device)
     try:
-        from opt import fold_bn, to_channels_last
+        from nn.sovereign_nano_opt import fold_bn, to_channels_last
         if args.fold:
             fold_bn(net)
             label += "+fold"
         if args.compile:
-            from opt import compile_if_available
+            from nn.sovereign_nano_opt import compile_if_available
             net = compile_if_available(net)
             label += "+compile"
     except ImportError:
@@ -62,7 +66,7 @@ def run_one(cfg, device, args, label: str) -> None:
 
     def prep(x):
         if args.channels_last and x.dim() == 4:
-            from opt import to_channels_last
+            from nn.sovereign_nano_opt import to_channels_last
             return to_channels_last(x)
         return x
 
