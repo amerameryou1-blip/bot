@@ -72,15 +72,33 @@ try:
     # extra copy doubled the 17GB footprint. Symlinks off, no copy.
     os.environ["SOV_TMP"] = "/kaggle/working"
     SH = "/kaggle/working/shards/rl/shards_v2"
+    os.makedirs(SH, exist_ok=True)
+    # 2026-08-15: pool (20.5GB) EXCEEDS Kaggle's ~20GB disk -> run1/run2 died.
+    # Download the NEWEST shards up to a 13GB cap instead of snapshot-all.
     try:
-        from huggingface_hub import snapshot_download
-        snapshot_download("amer224/territorial-bot-data",
-                          repo_type="dataset",
-                          allow_patterns=["rl/shards_v2/*"],
-                          local_dir="/kaggle/working/shards",
-                          local_dir_use_symlinks=False,
-                          token=os.environ["HF_TOKEN"])
-        print("shards from HF:", len(glob.glob(SH + "/*.npz")), flush=True)
+        from huggingface_hub import HfApi, hf_hub_download
+        api = HfApi(token=os.environ["HF_TOKEN"])
+        fs = sorted((f for f in api.list_repo_tree(
+            "amer224/territorial-bot-data", path_in_repo="rl/shards_v2",
+            repo_type="dataset", token=os.environ["HF_TOKEN"])
+            if getattr(f, "size", 0) > 0), key=lambda f: f.rfilename)
+        cap = 13e9
+        tot = 0
+        n = 0
+        for f in reversed(fs):
+            if tot + f.size > cap:
+                continue
+            try:
+                p = hf_hub_download("amer224/territorial-bot-data", f.rfilename,
+                                    repo_type="dataset",
+                                    local_dir="/kaggle/working/shards",
+                                    local_dir_use_symlinks=False,
+                                    token=os.environ["HF_TOKEN"])
+                tot += f.size
+                n += 1
+            except Exception as e:
+                print("dl skip", f.rfilename, str(e)[:60], flush=True)
+        print(f"shards from HF: {n} ({tot/1e9:.1f} GB capped)", flush=True)
     except Exception as e:
         print("HF pull failed:", str(e)[:150], flush=True)
     # ---- GPU sanity smoke first (mini config, 3 steps, cheap) -----------

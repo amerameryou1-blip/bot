@@ -431,7 +431,13 @@ def main():
                               f"cell={running.get('cell_nll', 0):.3f} "
                               f"wm_z={running.get('wm_z', 0):.4f}", flush=True)
                     if step % args.eval_every == 0:
-                        do_eval(f"step{step}")
+                        # 2026-08-15: runs 1+2 both died around first eval.
+                        # A mid-run eval crash must NEVER kill training.
+                        try:
+                            do_eval(f"step{step}")
+                        except Exception as e:
+                            print(f"[warn] mid-eval failed: {str(e)[:150]}",
+                                  flush=True)
                     if time.time() - last_hb > 120:
                         last_hb = time.time()
                         heartbeat(phase="training", step=step,
