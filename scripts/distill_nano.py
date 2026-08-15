@@ -48,16 +48,9 @@ def distill_nano(teacher, student, batches: Iterator[dict], epochs: int = 1,
                              return_all=True)
             so = student(rgb, nums, rtg=rtg, cell=cell, return_all=True)
 
-            # 2026-08-15 pipeline-agent fixes (verified by running his smoke):
-            # cell_logits is (B,3,g*g); the joint (kind,cell) distribution lives
-            # on the FLATTENED last dim. Softmax over dim=1 normalized over the
-            # 3 kinds (wrong axis), the CE crashed (target (B,)), and the
-            # search-target KL shape-mismatched ((B,3,g²) vs (B,3g²)).
-            sj = so["cell_logits"].flatten(1)
-            tj = to["cell_logits"].flatten(1).detach()
             loss = kl_cell * F.kl_div(
-                F.log_softmax(sj, -1),
-                F.softmax(tj, -1), reduction="batchmean")
+                F.log_softmax(so["cell_logits"], 1),
+                F.softmax(to["cell_logits"], 1), reduction="batchmean")
             loss = loss + kl_kind * F.kl_div(
                 F.log_softmax(so["kind_logits"], 1),
                 F.softmax(to["kind_logits"], 1), reduction="batchmean")
@@ -70,14 +63,12 @@ def distill_nano(teacher, student, batches: Iterator[dict], epochs: int = 1,
                 F.mse_loss(so["pct_params"][1], to["pct_params"][1]))
             if so["econ"] is not None and to["econ"] is not None:
                 loss = loss + mse_econ * F.mse_loss(so["econ"], to["econ"])
-            # self-BC on the recorded cell: use the kind-marginal click logits
-            loss = loss + ce_cell * F.cross_entropy(
-                torch.logsumexp(so["cell_logits"], dim=1), cell)
+            loss = loss + ce_cell * F.cross_entropy(so["cell_logits"], cell)
             if "search_targets" in raw:
-                st = raw["search_targets"].to(dev).clamp_min(1e-6)
-                if st.shape[-1] == sj.shape[-1]:
-                    loss = loss + search_w * F.kl_div(
-                        F.log_softmax(sj, -1), st, reduction="batchmean")
+                loss = loss + search_w * F.kl_div(
+                    F.log_softmax(so["cell_logits"], 1),
+                    raw["search_targets"].to(dev).clamp_min(1e-6),
+                    reduction="batchmean")
 
             opt.zero_grad()
             loss.backward()
@@ -97,14 +88,7 @@ def save_student(student, path: str) -> None:
 if __name__ == "__main__":
     # smoke: teacher = nano-width net, student = thinner nano — the real
     # teacher swaps in without code changes (same contract).
-    # repo-safe import (module lives at nn/sovereign_nano.py in the pipeline
-    # repo; standalone copy is model_nano.py in the rival's drop)
-    import os, sys
-    sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src"))
-    try:
-        from nn.sovereign_nano import NanoConfig, make_nano
-    except Exception:
-        from model_nano import NanoConfig, make_nano
+    from nn.sovereign_nano import NanoConfig, make_nano
 
     tcfg = NanoConfig(map_size=64)
     scfg = NanoConfig(map_size=64)
@@ -117,6 +101,6 @@ if __name__ == "__main__":
     student = make_nano(scfg, seed=1)
     batch = [dict(rgb=torch.rand(2, 3, 64, 64), nums=torch.rand(2, 8),
                   rtg=torch.rand(2, 1), cell=torch.tensor([10, 40]),
-                  search_targets=torch.rand(2, 3 * 32 * 32))]
+                  search_targets=torch.rand(2, 3 * 16 * 16))]
     distill_nano(teacher, student, iter(batch), epochs=1, device="cpu")
     print("distill_nano.py smoke OK")
