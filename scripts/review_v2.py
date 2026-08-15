@@ -171,6 +171,11 @@ def main():
             if rec.get("flags"):
                 print(f"skip {name}: needs agent eyes {rec['flags']}")
                 continue
+            if a.auto and "map_ok" not in rec:
+                # pre-fingerprint entry (audited by older code): drop from
+                # plist so the next fetch re-audits it with map_ok.
+                del plist[name]
+                continue
             if a.auto and not rec.get("map_ok"):
                 continue  # daemon may only auto-commit fingerprint-clean shards
             cg = rec["gb"] * rec.get("clean_frac", 1.0)
