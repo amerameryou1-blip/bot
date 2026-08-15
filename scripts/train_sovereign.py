@@ -437,10 +437,10 @@ def main():
         do_eval("final")
     except KeyboardInterrupt as e:
         print(f"[sov] stop: {e}", flush=True)
-    # shift-end safety (old-teacher lesson): save where we are
-    wr, rank = evaluate_sovereign(model, seeds=max(args.eval_seeds, 1))
-    print(f"[sov] END-EVAL: wr={wr:.2f} rank={rank:.2f} steps={step}",
-          flush=True)
+    # shift-end safety (old-teacher lesson): save where we are.
+    # 2026-08-15 fix: run1 uploaded the final ckpt but DIED in the unguarded
+    # eval below it -> checkpoint with zero eval numbers. Save + heartbeat
+    # FIRST, eval guarded.
     ck = TMP / "sov_final.pt"
     torch.save(model.state_dict(), ck)
     if not args.no_hf and _hf_token():
@@ -448,7 +448,23 @@ def main():
             hf_upload(ck, f"{SOV_DIR}/ckpt_final_{int(time.time())}.pt")
         except Exception as e:
             print("[warn] final upload:", str(e)[:120], flush=True)
-    heartbeat(phase="done", step=step, wr=wr, rank=rank, no_hf=args.no_hf)
+    heartbeat(phase="final_ckpt_saved", step=step, no_hf=args.no_hf)
+    try:
+        wr, rank = evaluate_sovereign(model, seeds=max(args.eval_seeds, 1))
+        print(f"[sov] END-EVAL: wr={wr:.2f} rank={rank:.2f} steps={step}",
+              flush=True)
+        if (wr > best["wr"] + 1e-9) or \
+           (abs(wr - best["wr"]) < 1e-9 and rank <= best["rank"] - 2.0):
+            ts = int(time.time())
+            best = {"ts": ts, "wr": wr, "rank": rank, "source": "sovereign"}
+            bp = TMP / "sov_best.json"
+            json.dump(best, open(bp, "w"))
+            if not args.no_hf and _hf_token():
+                hf_upload(bp, f"{SOV_DIR}/best.json")
+                print(f"[sov] BEST uploaded ts={ts}", flush=True)
+    except Exception as e:
+        print("[warn] final eval failed:", str(e)[:150], flush=True)
+    heartbeat(phase="done", step=step, no_hf=args.no_hf)
     print("[sov] DONE", flush=True)
 
 

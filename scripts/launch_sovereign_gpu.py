@@ -103,7 +103,9 @@ try:
     r = RUN([sys.executable, "scripts/train_sovereign.py",
              "--device", "cuda", "--amp", "--bs", "8",
              "--data-dir", SH,
-             "--epochs", "@@EPOCHS@@", "--eval-every", "800",
+                    # 2026-08-15: run1 stopped at step 758 with eval_every=800
+                    # -> ZERO evals ever fired. 300 gives >=2 mid-run evals.
+                    "--epochs", "@@EPOCHS@@", "--eval-every", "300",
              "--eval-seeds", "16", "--grad-ckpt"])
     print("sovereign stage-A rc=", r.returncode, flush=True)
     print("SOVEREIGN_GPU_DONE", flush=True)
