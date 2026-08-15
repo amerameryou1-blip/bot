@@ -19,9 +19,11 @@ from launch_loop_kernels import push_kernel  # noqa: E402
 
 SOV_TRAIN_BOOT = '''import os, subprocess, sys, time, glob, shutil
 
+LOGF = open("/tmp/sovboot.log", "w", buffering=1)
+
 class _Tee:
-    def __init__(self, path):
-        self._f = open(path, "w", buffering=1)
+    def __init__(self, f):
+        self._f = f
         self._s = sys.__stdout__
     def write(self, t):
         try: self._f.write(t)
@@ -33,8 +35,11 @@ class _Tee:
         self._s.flush()
 
 os.environ.setdefault("HF_TOKEN", "@@HF@@")
-sys.stdout = _Tee("/tmp/sovboot.log")
-print("sovereign-gpu boot v2", flush=True)
+sys.stdout = _Tee(LOGF)
+# v3: child subprocess output goes to the SAME log (v2 lost the traceback)
+RUN = lambda *a, **k: subprocess.run(*a, stdout=LOGF,
+                                     stderr=subprocess.STDOUT, **k)
+print("sovereign-gpu boot v3", flush=True)
 
 def _up_log():
     try:
@@ -48,19 +53,19 @@ def _up_log():
         print("log upload fail:", str(e)[:120], flush=True)
 
 try:
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q",
-                    "torch==2.4.1",
-                    "--index-url", "https://download.pytorch.org/whl/cu121"],
-                   check=False)
-    subprocess.run([sys.executable, "-c",
-                    "import torch; a=torch.randn(16,16,device='cuda');"
-                    "(a@a).sum().item(); torch.cuda.synchronize();"
-                    "print('CUDA_OK gpus=', torch.cuda.device_count())"],
-                   check=False)
-    subprocess.run([sys.executable, "-m", "pip", "install", "-q", "numpy",
-                    "huggingface_hub", "pillow"], check=False)
-    subprocess.run(["git", "clone", "--depth", "1", "@@REPO_URL@@",
-                    "/kaggle/working/bot"], check=True)
+    RUN([sys.executable, "-m", "pip", "install", "-q",
+         "torch==2.4.1",
+         "--index-url", "https://download.pytorch.org/whl/cu121"],
+        check=False)
+    RUN([sys.executable, "-c",
+         "import torch; a=torch.randn(16,16,device='cuda');"
+         "(a@a).sum().item(); torch.cuda.synchronize();"
+         "print('CUDA_OK gpus=', torch.cuda.device_count())"],
+        check=False)
+    RUN([sys.executable, "-m", "pip", "install", "-q", "numpy",
+         "huggingface_hub", "pillow"], check=False)
+    RUN(["git", "clone", "--depth", "1", "@@REPO_URL@@",
+         "/kaggle/working/bot"], check=True)
     os.chdir("/kaggle/working/bot")
     # ---- data: ONE real-file download into the 20GB working disk --------
     # v1 died here: default cache lives on the small home disk and the
@@ -79,18 +84,27 @@ try:
     except Exception as e:
         print("HF pull failed:", str(e)[:150], flush=True)
     # ---- GPU sanity smoke first (mini config, 3 steps, cheap) -----------
-    r = subprocess.run([sys.executable, "scripts/train_sovereign.py", "--mini",
-                        "--data-dir", SH,
-                        "--steps", "3", "--bs", "2", "--eval-seeds", "1",
-                        "--eval-every", "100000", "--max-minutes", "20",
-                        "--no-hf"])
+    r = RUN([sys.executable, "scripts/train_sovereign.py", "--mini",
+             "--data-dir", SH,
+             "--steps", "3", "--bs", "2", "--eval-seeds", "1",
+             "--eval-every", "100000", "--max-minutes", "20",
+             "--no-hf"])
     print("mini smoke rc=", r.returncode, flush=True)
+    # ---- CUDA dry-run: 2 real steps so any GPU crash lands in the log ---
+    r = RUN([sys.executable, "scripts/train_sovereign.py",
+             "--device", "cuda", "--amp", "--bs", "16", "--grad-ckpt",
+             "--data-dir", SH, "--steps", "2", "--eval-seeds", "1",
+             "--eval-every", "999999", "--max-minutes", "10"])
+    print("cuda dry-run rc=", r.returncode, flush=True)
+    if r.returncode != 0:
+        print("DRY-RUN FAILED — see log; NOT starting full train", flush=True)
+        raise SystemExit(1)
     # ---- real Stage-A pretrain -------------------------------------------
-    r = subprocess.run([sys.executable, "scripts/train_sovereign.py",
-                        "--device", "cuda", "--amp", "--bs", "16",
-                        "--data-dir", SH,
-                        "--epochs", "@@EPOCHS@@", "--eval-every", "800",
-                        "--eval-seeds", "16", "--grad-ckpt"])
+    r = RUN([sys.executable, "scripts/train_sovereign.py",
+             "--device", "cuda", "--amp", "--bs", "16",
+             "--data-dir", SH,
+             "--epochs", "@@EPOCHS@@", "--eval-every", "800",
+             "--eval-seeds", "16", "--grad-ckpt"])
     print("sovereign stage-A rc=", r.returncode, flush=True)
     print("SOVEREIGN_GPU_DONE", flush=True)
 finally:
