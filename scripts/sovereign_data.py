@@ -32,6 +32,7 @@ No exotic dependencies (numpy + torch).
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterator, List, Optional, Sequence, Tuple
@@ -42,8 +43,8 @@ from torch.utils.data import Dataset, WeightedRandomSampler, DataLoader
 
 GAMMA = 0.995
 GRID = 32
-SURVIVOR_MULT = 4.0
-KILL_MULT = 2.0
+SURVIVOR_MULT = float(os.environ.get("SOV_SURVIVOR_MULT", "4.0"))
+KILL_MULT = float(os.environ.get("SOV_KILL_MULT", "2.0"))
 KILL_WINDOW = 2
 TAU = 1.0
 W_CLIP = (0.2, 8.0)

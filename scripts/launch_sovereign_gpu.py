@@ -137,13 +137,21 @@ def main():
     if not hf:
         print("HF_TOKEN required")
         sys.exit(1)
+    # FULL MODE (17 Aug, user-approved 60h/wk): SOV_B=1 launches the acct2
+    # aggressive-weights variant (survivor x2 / kill x4) as a parallel ablation.
+    b = os.environ.get("SOV_B", "") == "1"
     code = (SOV_TRAIN_BOOT
             .replace("@@HF@@", hf)
             .replace("@@REPO_URL@@",
                      "https://" + os.environ.get("GH_TOKEN", "")
                      + "@github.com/amerameryou1-blip/bot.git")
             .replace("@@EPOCHS@@", os.environ.get("EPOCHS", "2")))
-    print(push_kernel("sovereign-gpu", "sovereign-gpu", code, gpu=True))
+    code = ("import os\nos.environ['SOV_SURVIVOR_MULT']='2.0'\n"
+            "os.environ['SOV_KILL_MULT']='4.0'\n" + code) if b else code
+    slug = "sovereign-gpu-b" if b else "sovereign-gpu"
+    owner = "amer38" if b else "amerameryou"
+    tok = os.environ.get("KG2", "") if b else os.environ.get("KG1", "")
+    print(push_kernel(slug, slug, code, gpu=True, owner=owner, token=tok))
 
 
 if __name__ == "__main__":

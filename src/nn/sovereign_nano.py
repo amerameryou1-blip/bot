@@ -854,12 +854,15 @@ def make_nano(cfg: Optional[NanoConfig] = None,
     return Nano(cfg)
 
 
-def load_real_shard():
-    """Try the REAL shard first (via $HF_TOKEN), then a local copy."""
+def load_real_shard(mmap: bool = False):
+    """Try the REAL shard first (via $HF_TOKEN), then a local copy.
+    mmap=True memory-maps the npz (tiny mode on a 2GB box: the full
+    arrays never sit in RAM; prep slices before any float32 conversion)."""
+    mode = "r" if mmap else None
     for candidate in ("shard_v2_1786707781_27_23.npz",
                       "rl/shards_v2/shard_v2_1786707781_27_23.npz"):
         if os.path.exists(candidate):
-            return np.load(candidate)
+            return np.load(candidate, mmap_mode=mode)
     try:
         from huggingface_hub import hf_hub_download
         token = os.environ.get("HF_TOKEN")
@@ -867,7 +870,7 @@ def load_real_shard():
             return None
         path = hf_hub_download(HF_DATASET, HF_SHARD, repo_type="dataset",
                                token=token, local_dir="/tmp/nano_real")
-        return np.load(path)
+        return np.load(path, mmap_mode=mode)
     except Exception as e:
         print(f"real shard fetch failed ({str(e)[:100]}) — using replica")
         return None
@@ -926,7 +929,7 @@ if __name__ == "__main__":
           f"[spine {bd['spine']:,} | decoder {bd['decoder']:,} | "
           f"heads {bd['heads']:,} | mem {bd['mem']:,}]")
 
-    d = load_real_shard()
+    d = load_real_shard(mmap=tiny)
     if d is not None:
         print("REAL shard loaded — schema asserts below:")
         print(f"  keys: {sorted(k for k in d.keys())}")
@@ -943,23 +946,28 @@ if __name__ == "__main__":
     print(f"prep: {B} frames from {prep['real_episodes']} episodes "
           f"({prep['real_frames']} total frames in shard)")
 
-    # forward (contract)
-    click, kind_logits, pct, value = net(prep["rgb"], prep["nums"],
-                                         rtg=prep["rtg"])
-    assert click.shape == (B, 1024), click.shape
-    assert kind_logits.shape == (B, 3), kind_logits.shape
-    assert pct.shape == (B,), pct.shape
-    assert value.shape == (B,), value.shape
-    print(f"forward: {tuple(click.shape)} {tuple(kind_logits.shape)} "
-          f"{tuple(pct.shape)} {tuple(value.shape)} — PASS")
+    # forward + act probes — no_grad (B's 17-Aug note: the probes were
+    # grad-enabled and never freed, holding full-graph activations at
+    # B=8/16 — that was the ~1.5GB tiny-mode peak. no_grad + del keeps
+    # the only grad graph as the L=4 loss below.)
+    with torch.no_grad():
+        click, kind_logits, pct, value = net(prep["rgb"], prep["nums"],
+                                             rtg=prep["rtg"])
+        assert click.shape == (B, 1024), click.shape
+        assert kind_logits.shape == (B, 3), kind_logits.shape
+        assert pct.shape == (B,), pct.shape
+        assert value.shape == (B,), value.shape
+        print(f"forward: {tuple(click.shape)} {tuple(kind_logits.shape)} "
+              f"{tuple(pct.shape)} {tuple(value.shape)} — PASS")
 
-    # act at B=4 — logprob/entropy MUST be (B,)
-    a = net.act(prep["rgb"][:4], prep["nums"][:4], rtg=prep["rtg"][:4])
-    assert a["logprob"].shape == (4,), a["logprob"].shape
-    assert a["entropy"].shape == (4,), a["entropy"].shape
-    print(f"act(B=4): logprob {tuple(a['logprob'].shape)} | entropy "
-          f"{tuple(a['entropy'].shape)} | state "
-          f"{tuple(a['state'].shape)} — PASS")
+        # act at B=4 — logprob/entropy MUST be (B,)
+        a = net.act(prep["rgb"][:4], prep["nums"][:4], rtg=prep["rtg"][:4])
+        assert a["logprob"].shape == (4,), a["logprob"].shape
+        assert a["entropy"].shape == (4,), a["entropy"].shape
+        print(f"act(B=4): logprob {tuple(a['logprob'].shape)} | entropy "
+              f"{tuple(a['entropy'].shape)} | state "
+              f"{tuple(a['state'].shape)} — PASS")
+        del click, kind_logits, pct, value, a
 
     # stage-a loss + backward (tiny mode: 4-sample slice keeps one small
     # grad graph instead of two bs16 graphs)
@@ -975,11 +983,12 @@ if __name__ == "__main__":
         nums_next=prep["econ_t"][:L], w=prep["w"][:L])
     assert torch.isfinite(loss), "non-finite loss"
     # pipeline review finding 1 (asserted): with the 0.1x heat-tower init,
-    # the cell CE must start at the uniform floor ln(1024)≈6.93 — NOT the
-    # over-confident 16+ of the default init
+    # the cell CE must NOT be over-confident. NOTE (B, 17 Aug): on the
+    # real shard 1786707781 the init cell CE measures 8.81/9.19 — the
+    # ideal uniform floor ln(1024)≈6.93 is unreachable because the
+    # mixer's nonzero features survive the 0.1x tower conv. Threshold
+    # <9.5 (B's calibrated value) still catches the 16+ disease class.
     init_cell = float(terms["cell_nll"])
-    # B 17 Aug: A's 8.5 threshold miscalibrated — shard_1786707781 measures
-    # 8.81 with the fix; 9.5 still catches the 16+ disease class.
     assert init_cell < 9.5, \
         f"init cell CE {init_cell:.2f} — heat init over-confident (regressed?)"
     loss.backward()
