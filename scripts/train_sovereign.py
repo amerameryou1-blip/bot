@@ -219,6 +219,10 @@ def evaluate_sovereign(net, seeds=16, silent=True, rtg_asp=0.0):
     if not silent:
         print(f"EVAL-SOV ({T.SIM['n_bots']}-player): wr={wr:.2f} "
               f"alive={survived / seeds:.2f} rank={avg_rank:.2f}", flush=True)
+    # 17 Aug fix (the step-300 killer): eval left the GRU in eval mode so the
+    # next training backward raised "cudnn RNN backward ... training mode".
+    if was_training:
+        net.train()
     return wr, avg_rank
 
 
