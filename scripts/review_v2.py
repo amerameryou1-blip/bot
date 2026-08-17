@@ -54,9 +54,20 @@ def main():
         import shutil
         api = HfApi(token=tok)
         plist_early = (json.load(open(PENDING)) if PENDING.exists() else {})
-        fs = sorted(f for f in api.list_repo_files(
-            HF_DATASET, repo_type="dataset", token=tok)
-            if f.startswith("rl/shards_v2/"))
+        # 17 Aug: HF list API EOF-flakes killed a whole daemon cycle; retry.
+        fs = None
+        for _try in range(4):
+            try:
+                fs = sorted(f for f in api.list_repo_files(
+                    HF_DATASET, repo_type="dataset", token=tok)
+                    if f.startswith("rl/shards_v2/"))
+                break
+            except Exception as e:
+                print(f"LIST-RETRY: {str(e)[:60]}", flush=True)
+                time.sleep(10)
+        if fs is None:
+            print("LIST FAILED 4x — cycle aborted", flush=True)
+            return
         pending = [f for f in fs if Path(f).name not in ledger["files"]
                    and Path(f).name not in plist_early]
         print(f"HF shards: {len(fs)}, reviewed: {len(fs)-len(pending)}, "
