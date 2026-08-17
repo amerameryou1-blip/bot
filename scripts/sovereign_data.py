@@ -339,17 +339,19 @@ class ShardPrepper:
         #   lens   : per-episode TICK counts -> frames = lens // REC_EVERY
         # The original code assumed all per-frame -> IndexError on real data.
         REC_EVERY = 2
+        # 17 Aug fix: ODD tick counts (999 ticks -> 500 frames) broke the
+        # floor-based detection and fell into the legacy branch -> crash.
+        # Ceil per episode: (l+1)//2.
+        rec = [max(1, (l + 1) // REC_EVERY) for l in lens_raw]
         if (len(alive_raw) == len(lens_raw)
                 and int(np.sum(lens_raw)) == len(reward_raw)
-                and int(np.sum(lens_raw)) // REC_EVERY == N):
+                and int(np.sum(rec)) == N):
             alive_ep = np.asarray(alive_raw).astype(bool)
-            lens = [max(1, l // REC_EVERY) for l in lens_raw]
-            assert int(np.sum(lens)) == N, "frame lens mismatch"
+            lens = rec
             reward = np.zeros(N, dtype=np.float32)   # ticks -> frames (sum)
             off_s = 0
             off_f = 0
-            for l_t in lens_raw:
-                r_f = max(1, l_t // REC_EVERY)
+            for l_t, r_f in zip(lens_raw, rec):
                 for f in range(r_f):
                     lo = off_s + f * REC_EVERY
                     hi = min(off_s + l_t, lo + REC_EVERY)

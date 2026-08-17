@@ -163,6 +163,7 @@ def world_model_loss(model, batch, policy_out, device, amp_on=False):
 def evaluate_sovereign(net, seeds=16, silent=True, rtg_asp=0.0):
     import train_nn as T
     from bot.planner import ClickAction
+    was_training = net.training
     net.eval()
     dev = next(net.parameters()).device
     wins = survived = 0

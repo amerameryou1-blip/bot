@@ -45,7 +45,7 @@ def _up_log():
     try:
         from huggingface_hub import upload_file
         upload_file(path_or_fileobj="/tmp/sovboot.log",
-                    path_in_repo="rl/sovereign_boot.log",
+                    path_in_repo="@@BOOTLOG@@",
                     repo_id="amer224/territorial-bot-data",
                     repo_type="dataset", token=os.environ["HF_TOKEN"])
         print("boot log uploaded", flush=True)
@@ -146,6 +146,10 @@ def main():
                      "https://" + os.environ.get("GH_TOKEN", "")
                      + "@github.com/amerameryou1-blip/bot.git")
             .replace("@@EPOCHS@@", os.environ.get("EPOCHS", "2")))
+    # per-kernel boot log so the two arms never race on one path
+    _slug = "sovereign-gpu-b" if os.environ.get("SOV_B", "") == "1" \
+        else "sovereign-gpu"
+    code = code.replace("@@BOOTLOG@@", f"rl/sovereign_boot_{_slug}.log")
     code = ("import os\nos.environ['SOV_SURVIVOR_MULT']='2.0'\n"
             "os.environ['SOV_KILL_MULT']='4.0'\n" + code) if b else code
     slug = "sovereign-gpu-b" if b else "sovereign-gpu"
