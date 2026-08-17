@@ -469,6 +469,16 @@ class Sovereign(nn.Module):
 
         self.apply(_init_weights)
 
+        # ANTI-OVER-CONFIDENCE INIT (A's fix, synced 17 Aug; v8 hit cell_nll
+        # 36 at scale): scale each kind tower's final 1x1 conv by 0.1x and
+        # zero bias so heat logits start near-uniform.
+        with torch.no_grad():
+            for t in self.kind_towers:
+                fin = t.net[-1]
+                fin.weight.mul_(0.1)
+                if fin.bias is not None:
+                    fin.bias.zero_()
+
     # -- helpers ------------------------------------------------------------
 
     def _staged(self, m: nn.Module, x: torch.Tensor) -> torch.Tensor:
@@ -786,7 +796,9 @@ def stage_a_loss(out: dict, kind: torch.Tensor, cell: torch.Tensor,
     # treated the 3 KINDS as classes and crashed (RuntimeError: Expected
     # target size [B, g*g]). Select the taken-kind row -> p(cell | kind).
     cell_logits_k = out["cell_logits"][torch.arange(B, device=kind.device), kind]
-    cell_nll = F.cross_entropy(cell_logits_k, cell, reduction="none")
+    # 0.02 label smoothing (A's fix synced 17 Aug) vs over-confident heat
+    cell_nll = F.cross_entropy(cell_logits_k, cell, reduction="none",
+                               label_smoothing=0.02)
     pct_nll = -(Beta(out["pct_params"][0], out["pct_params"][1])
                 .log_prob(pct_t.clamp(EPS, 1 - EPS)))
     pct_nll = pct_nll * (kind != 2).float()          # bank: pct undefined

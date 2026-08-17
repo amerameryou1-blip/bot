@@ -26,9 +26,15 @@ import torch.nn as nn
 
 
 def quantize_dynamic(model: nn.Module) -> nn.Module:
-    """Quantize Linear + GRU to qint8 (in place). Convs stay fp32."""
-    return torch.quantization.quantize_dynamic(
-        model, {nn.Linear, nn.GRU}, dtype=torch.qint8)
+    """Quantize Linear + GRU to qint8 (in place). Convs stay fp32.
+    Uses torch.ao.quantization (the canonical path since 1.13; the old
+    torch.quantization alias emits a deprecation warning — pipeline
+    review finding 3)."""
+    try:
+        from torch.ao import quantization as tq
+    except ImportError:
+        import torch.quantization as tq          # torch < 1.13 fallback
+    return tq.quantize_dynamic(model, {nn.Linear, nn.GRU}, dtype=torch.qint8)
 
 
 if __name__ == "__main__":

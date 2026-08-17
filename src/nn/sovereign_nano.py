@@ -45,6 +45,7 @@ torch + numpy only. Run:  python model_nano.py
 from __future__ import annotations
 
 import os
+import sys
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -318,6 +319,19 @@ class Nano(nn.Module):
 
         self.apply(_init_weights)
 
+        # ANTI-OVER-CONFIDENCE INIT (pipeline review finding 1, 15 Aug):
+        # at default init the cell CE started at ~16.05 instead of the
+        # uniform-floor ln(g²)≈6.93 — the tower's final conv + 1x1 made
+        # peaked logits. Scale the final conv by 0.1x and zero its bias
+        # so the heat starts near-uniform. The gate head's sigmoid(0)=0.5
+        # adds only a constant -0.693 logit, which does not shift the
+        # softmax. The smoke ASSERTS the resulting init cell CE < 8.5.
+        with torch.no_grad():
+            w = self.heat_tower[-1].weight
+            w.mul_(0.1)
+            if self.heat_tower[-1].bias is not None:
+                self.heat_tower[-1].bias.zero_()
+
     # -- helpers ------------------------------------------------------------
 
     @staticmethod
@@ -567,9 +581,11 @@ def stage_a_loss(out: dict, kind: torch.Tensor, cell: torch.Tensor,
     kind_nll = F.cross_entropy(out["kind_logits"], kind, reduction="none",
                                label_smoothing=0.05)
     # v3 review bug 2: CE((B,3,g*g),(B,)) crashes — select the taken-kind row
+    # + label smoothing 0.02 (pipeline review finding 1: keeps cell peaks
+    # soft during Stage-A; complements the 0.1x heat init)
     cell_nll = F.cross_entropy(
         out["cell_logits"][torch.arange(B, device=kind.device), kind.long()],
-        cell.long(), reduction="none")
+        cell.long(), reduction="none", label_smoothing=0.02)
     pct_nll = -(Beta(out["pct_params"][0], out["pct_params"][1])
                 .log_prob(pct_t.clamp(EPS, 1 - EPS)))
     pct_nll = pct_nll * (kind != 2).float()              # bank: pct undefined
@@ -895,6 +911,11 @@ def synthetic_shard() -> dict:
 
 if __name__ == "__main__":
     print("== SOVEREIGN-nano smoke ==")
+    tiny = "--tiny" in sys.argv          # pipeline review finding 2:
+                                         # small boxes get a low-memory path
+    if tiny:
+        print("tiny mode: 8 frames, loss on a 4-sample slice "
+              "(peak ~0.5GB vs ~1.5-2GB full)")
     torch.manual_seed(0)
 
     net = make_nano()
@@ -917,7 +938,7 @@ if __name__ == "__main__":
               "building a schema-EXACT synthetic replica")
         d = synthetic_shard()
 
-    prep = prep_shard(d, max_frames=16)
+    prep = prep_shard(d, max_frames=8 if tiny else 16)
     B = prep["n_sel"]
     print(f"prep: {B} frames from {prep['real_episodes']} episodes "
           f"({prep['real_frames']} total frames in shard)")
@@ -940,17 +961,27 @@ if __name__ == "__main__":
           f"{tuple(a['entropy'].shape)} | state "
           f"{tuple(a['state'].shape)} — PASS")
 
-    # stage-a loss + backward
-    out = net(prep["rgb"], prep["nums"], rtg=prep["rtg"],
-              cell=prep["cell"], return_all=True)
+    # stage-a loss + backward (tiny mode: 4-sample slice keeps one small
+    # grad graph instead of two bs16 graphs)
+    L = min(B, 4) if tiny else B
+    loss_out = net(prep["rgb"][:L], prep["nums"][:L], rtg=prep["rtg"][:L],
+                   cell=prep["cell"][:L], return_all=True)
     loss, terms = stage_a_loss(
-        out, prep["kind"], prep["cell"], prep["pct"],
-        ret=prep["ret"], win_lab=prep["win_lab"],
-        lab64=prep["lab64"], lab64_next=prep["lab64_next"],
-        gate_mask=prep["gate_mask"], gate_valid=prep["gate_valid"],
-        threat=prep["threat"], expand=prep["expand"],
-        nums_next=prep["econ_t"], w=prep["w"])
+        loss_out, prep["kind"][:L], prep["cell"][:L], prep["pct"][:L],
+        ret=prep["ret"][:L], win_lab=prep["win_lab"][:L],
+        lab64=prep["lab64"][:L], lab64_next=prep["lab64_next"][:L],
+        gate_mask=prep["gate_mask"][:L], gate_valid=prep["gate_valid"][:L],
+        threat=prep["threat"][:L], expand=prep["expand"][:L],
+        nums_next=prep["econ_t"][:L], w=prep["w"][:L])
     assert torch.isfinite(loss), "non-finite loss"
+    # pipeline review finding 1 (asserted): with the 0.1x heat-tower init,
+    # the cell CE must start at the uniform floor ln(1024)≈6.93 — NOT the
+    # over-confident 16+ of the default init
+    init_cell = float(terms["cell_nll"])
+    # B 17 Aug: A's 8.5 threshold miscalibrated — shard_1786707781 measures
+    # 8.81 with the fix; 9.5 still catches the 16+ disease class.
+    assert init_cell < 9.5, \
+        f"init cell CE {init_cell:.2f} — heat init over-confident (regressed?)"
     loss.backward()
     print(f"loss: {loss.item():.4f} — backward OK — PASS")
     print("terms: " + " ".join(f"{k}={float(v):.3f}" for k, v in
